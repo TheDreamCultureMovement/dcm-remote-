@@ -366,7 +366,7 @@ function viewMerges() {
 function viewLanes() {
   const s = data.status; const run = (k) => s && s.lanes && s.lanes[k] === 'running';
   const now = new Date(); const mins = now.getHours() * 60 + now.getMinutes();
-  let h = '<div class="card"><h3>Start lanes</h3><p class="meta">The PC keeps its rules: Lane C only from 6 pm to 7 am; Lane X starts no new job after 4:30 pm; nothing starts while Lane X runs.</p>';
+  let h = '<div class="card"><h3>Start lanes</h3><p class="meta">The PC keeps its rules: Lane C only from 6 pm to 7 am; Lanes M and D start last, after A, B, C and R have finished; Lane X starts no new job after 4:30 pm; nothing starts while Lane X runs.</p>';
   h += '<button class="primary" style="margin-top:8px" data-act="start" data-lane="all">Start all lanes</button><div class="btns">';
   for (const k of ['A', 'B', 'C', 'D', 'R', 'M']) h += `<button class="secondary" data-act="start" data-lane="${k}" ${run(k) ? 'disabled' : ''}>Lane ${k}${run(k) ? ' (running)' : ''}</button>`;
   h += `<button class="secondary" data-act="start" data-lane="X" ${run('X') || mins >= 990 ? 'disabled' : ''}>Lane X${run('X') ? ' (running)' : mins >= 990 ? ' (after 4:30)' : ''}</button></div></div>`;
@@ -374,7 +374,7 @@ function viewLanes() {
   if (!data.requests.length) h += '<div class="empty">No requests in the last 4 days.</div>';
   for (const r of data.requests.slice(0, 15)) {
     const v = r.result ? r.result.verdict : 'waiting for the PC';
-    const cls = !r.result ? 'wait' : ['done', 'merged', 'started'].includes(v) ? 'ok' : 'bad';
+    const cls = !r.result || v === 'started' ? (r.result ? 'ok' : 'wait') : ['done', 'merged'].includes(v) ? 'ok' : 'bad';
     h += `<div class="card"><div class="row"><b>${esc(r.cmd.replace(/ no-press-confirmed$/, ''))}</b><span class="chip ${cls}">${esc(v)}</span></div><div class="meta">${ago(r.at)}</div>`;
     if (r.result && r.result.text) h += `<div class="q">${esc(r.result.text.replace(/^- /gm, '• '))}</div>`;
     h += '</div>';
