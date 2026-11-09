@@ -19,12 +19,14 @@
     --bg: #F7F4EE; --card: #FFFFFF; --ink: #1F1F1F; --muted: #66625B; --line: #E4DED2;
     --accent: #2F5D50; --accent-ink: #FFFFFF; --ok-bg: #D6EAD9; --ok: #1E4D2B;
     --bad-bg: #F6D4D1; --bad: #7A1F17; --wait-bg: #F3E6C8; --wait: #6B4E12; --idle-bg: #ECE7DC;
+    --g-done: #2F7D4F; --g-work: #D9932B; --g-todo: #D9D3C6; --g-block: #B5452F;
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #151515; --card: #1F1F1F; --ink: #F2EFE9; --muted: #A8A39A; --line: #34312C;
       --accent: #6FB39C; --accent-ink: #0E1A16; --ok-bg: #1E3A27; --ok: #A8DDB5;
       --bad-bg: #4A1E1A; --bad: #F2B3AC; --wait-bg: #3D3017; --wait: #EED39A; --idle-bg: #2A2824;
+      --g-done: #5FB884; --g-work: #E8AC4E; --g-todo: #45413A; --g-block: #E07A62;
     }
   }
   * { box-sizing: border-box; }
@@ -68,6 +70,9 @@
   dialog::backdrop { background: rgba(0,0,0,.45); }
   ol.steps { padding-left: 20px; } ol.steps li { margin: 6px 0; }
   .hide { display: none !important; }
+  .gauge { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
+  .gauge.empty { display: block; }
+  .gtext { text-align: right; } .gpct { font-size: 30px; font-weight: 700; line-height: 1.1; }
 </style>
 </head>
 <body>
@@ -147,7 +152,7 @@ function cardHtml(c, keys) {
 
 // ---------- loading ----------
 async function issuesIn(repo, label) {
-  const list = await api(`repos/${repo}/issues?state=open&labels=${encodeURIComponent(label)}&per_page=100`);
+  const list = await api(`repos/${repo}/issues?state=open&per_page=100${label === '__all__' ? '' : '&labels=' + encodeURIComponent(label)}`);
   return list.filter((i) => !i.pull_request).map((i) => ({ ...i, repoKey: repo === CFG.repos.market ? 'market' : 'dcm' }));
 }
 async function loadAll() {
@@ -158,10 +163,10 @@ async function loadAll() {
     const [issue, comments, w1, w2, p1, p2, g1, g2, att, a1, a2, c1, c2] = await Promise.all([
       api(`repos/${R.dcm}/issues/${CFG.requestIssue}`),
       api(`repos/${R.dcm}/issues/${CFG.requestIssue}/comments?per_page=100&since=${new Date(Date.now() - 4 * 864e5).toISOString()}`),
-      issuesIn(R.dcm, 'needs-anthony'), issuesIn(R.market, 'needs-anthony'),
+      Promise.all([1, 2, 3].map((pg) => api(`repos/${R.dcm}/issues?state=open&per_page=100&page=${pg}`))).then((ps) => ps.flat().filter((i) => !i.pull_request).map((i) => ({ ...i, repoKey: 'dcm' }))),
+      issuesIn(R.market, '__all__'),
       api(`repos/${R.dcm}/pulls?state=open&per_page=100`), api(`repos/${R.market}/pulls?state=open&per_page=100`),
-      issuesIn(R.dcm, 'in-progress'), issuesIn(R.market, 'in-progress'),
-      issuesIn(R.dcm, 'attended-waiting'),
+      null, null, null,
       api(`repos/${R.dcm}/pulls?state=all&sort=updated&direction=desc&per_page=60`), api(`repos/${R.market}/pulls?state=all&sort=updated&direction=desc&per_page=40`),
       api(`repos/${R.dcm}/issues?state=closed&since=${mid}&per_page=100`), api(`repos/${R.market}/issues?state=closed&since=${mid}&per_page=100`),
     ]);
@@ -172,10 +177,13 @@ async function loadAll() {
       .filter((i) => !i.pull_request && isToday(i.closed_at));
     const m = (issue.body || '').match(/<!-- dcm-remote-json (\{.*?\}) -->/);
     data.status = m ? JSON.parse(m[1]) : null;
-    data.waiting = [...w1, ...w2].sort((a, b) => a.number - b.number);
+    const allOpen = [...w1, ...w2];
+    const has = (i, n) => (i.labels || []).some((l) => l.name === n);
+    data.open = allOpen;
+    data.waiting = allOpen.filter((i) => has(i, 'needs-anthony')).sort((a, b) => a.number - b.number);
     data.prs = [...p1.map((p) => ({ ...p, repoKey: 'dcm' })), ...p2.map((p) => ({ ...p, repoKey: 'market' }))];
-    data.inprog = [...g1, ...g2];
-    data.attended = att;
+    data.inprog = allOpen.filter((i) => has(i, 'in-progress'));
+    data.attended = allOpen.filter((i) => i.repoKey === 'dcm' && has(i, 'attended-waiting'));
     // requests and their results
     const results = {};
     for (const c of comments) {
@@ -215,6 +223,22 @@ function laneOfPr(p) {
   if (p.repoKey === 'market' && /^harden/.test(p.head.ref)) return 'M';
   return laneOf(p.labels);
 }
+// Speedometer: the needle points at the share of today's queue that is done.
+function gauge(done, work, block, todo) {
+  const tot = done + work + block + todo;
+  if (!tot) return '<div class="gauge empty meta">Nothing queued for this lane.</div>';
+  const r = 70, cx = 90, cy = 82;
+  const xy = (f) => [cx - r * Math.cos(Math.PI * f), cy - r * Math.sin(Math.PI * f)];
+  const arc = (f0, f1, col) => { const [x0, y0] = xy(f0), [x1, y1] = xy(Math.max(f0, f1)); return `<path d="M${x0.toFixed(1)} ${y0.toFixed(1)} A${r} ${r} 0 0 1 ${x1.toFixed(1)} ${y1.toFixed(1)}" stroke="var(${col})" stroke-width="14" fill="none"/>`; };
+  let f = 0, s = arc(0, 1, '--g-todo');
+  for (const [n, col] of [[done, '--g-done'], [work, '--g-work'], [block, '--g-block']]) { if (n) { s += arc(f, f + n / tot - (f + n / tot < 1 ? 0.006 : 0), col); f += n / tot; } }
+  const [nx, ny] = xy(done / tot);
+  const pct = Math.round((done / tot) * 100);
+  const parts = [[work, 'working'], [todo, 'to do'], [block, 'waiting on you']].filter(([n]) => n).map(([n, t]) => `${n} ${t}`).join(' · ');
+  return `<div class="gauge"><svg width="150" height="82" viewBox="0 0 180 98" role="img" aria-label="${pct}% of today's queue done"><title>${done} done, ${work} working, ${todo} to do, ${block} waiting on you</title>${s}
+    <line x1="${cx}" y1="${cy}" x2="${nx.toFixed(1)}" y2="${ny.toFixed(1)}" stroke="var(--ink)" stroke-width="3.5" stroke-linecap="round"/><circle cx="${cx}" cy="${cy}" r="7" fill="var(--ink)"/></svg>
+    <div class="gtext"><div class="gpct">${pct}%</div><div class="meta">of today's queue done</div><div class="meta">${done} of ${tot}${parts ? ' · ' + parts : ''}</div></div></div>`;
+}
 function viewStatus() {
   const s = data.status; const pc = pcLine();
   let h = `<div class="card"><div class="row"><b>Your PC</b><span class="chip ${pc.cls}">${esc(pc.text)}</span></div>`;
@@ -248,6 +272,12 @@ function viewStatus() {
       h += '</div>';
     }
     if (done) h += `<div class="btns" style="grid-template-columns:1fr"><button class="secondary" data-act="toggle" data-key="${key}">${open[key] ? 'Hide' : 'Show'} what was done today</button></div>`;
+    const mine = (data.open || []).filter((i) => laneOf(i.labels) === k);
+    const tag = (i, n) => (i.labels || []).some((l) => l.name === n);
+    const gWork = mine.filter((i) => tag(i, 'in-progress')).length;
+    const gBlock = mine.filter((i) => tag(i, 'needs-anthony') && !tag(i, 'in-progress')).length;
+    const gTodo = mine.filter((i) => !tag(i, 'needs-anthony') && !tag(i, 'in-progress') && !(k === 'R' && tag(i, 'intel'))).length;
+    h += gauge(done, gWork, gBlock, gTodo);
     h += '</div>';
   }
   const other = data.today.prs.filter((p) => !laneOfPr(p));
