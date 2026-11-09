@@ -78,7 +78,7 @@
 <main id="main"></main>
 <nav id="nav" class="hide">
   <button data-tab="status" aria-selected="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Status</button>
-  <button data-tab="waiting"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Waiting <span class="badge hide" id="bWait"></span></span></button>
+  <button data-tab="decide"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l9 16H3z"/><path d="M12 10v4M12 17v.5"/></svg><span>Decide <span class="badge hide" id="bWait"></span></span></button>
   <button data-tab="merges"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M6 8.5v7M8 6c6 0 8 2 8 3.5"/></svg><span>Merges <span class="badge hide" id="bPr"></span></span></button>
   <button data-tab="lanes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 4v16M12 4v16M19 4v16"/></svg>Lanes</button>
 </nav>
@@ -96,7 +96,8 @@ const KEY = 'dcmRemoteToken';
 let token = null;
 try { token = localStorage.getItem(KEY); } catch (e) { token = null; }
 let tab = 'status';
-const data = { status: null, waiting: [], prs: [], inprog: [], requests: [], loadedAt: 0, error: '' };
+const data = { status: null, waiting: [], prs: [], inprog: [], attended: [], today: { prs: [], closed: [] }, requests: [], loadedAt: 0, error: '' };
+const qcache = {};       // latest comment, choices and recommendation per question
 const open = {};          // expanded items
 const pending = {};       // request id -> label, until a result arrives
 
@@ -153,18 +154,28 @@ async function loadAll() {
   data.error = '';
   try {
     const R = CFG.repos;
-    const [issue, comments, w1, w2, p1, p2, g1, g2] = await Promise.all([
+    const midnight = new Date(); midnight.setHours(0, 0, 0, 0); const mid = midnight.toISOString();
+    const [issue, comments, w1, w2, p1, p2, g1, g2, att, a1, a2, c1, c2] = await Promise.all([
       api(`repos/${R.dcm}/issues/${CFG.requestIssue}`),
       api(`repos/${R.dcm}/issues/${CFG.requestIssue}/comments?per_page=100&since=${new Date(Date.now() - 4 * 864e5).toISOString()}`),
       issuesIn(R.dcm, 'needs-anthony'), issuesIn(R.market, 'needs-anthony'),
       api(`repos/${R.dcm}/pulls?state=open&per_page=100`), api(`repos/${R.market}/pulls?state=open&per_page=100`),
       issuesIn(R.dcm, 'in-progress'), issuesIn(R.market, 'in-progress'),
+      issuesIn(R.dcm, 'attended-waiting'),
+      api(`repos/${R.dcm}/pulls?state=all&sort=updated&direction=desc&per_page=60`), api(`repos/${R.market}/pulls?state=all&sort=updated&direction=desc&per_page=40`),
+      api(`repos/${R.dcm}/issues?state=closed&since=${mid}&per_page=100`), api(`repos/${R.market}/issues?state=closed&since=${mid}&per_page=100`),
     ]);
+    const isToday = (iso) => iso && new Date(iso) >= midnight;
+    data.today.prs = [...a1.map((p) => ({ ...p, repoKey: 'dcm' })), ...a2.map((p) => ({ ...p, repoKey: 'market' }))]
+      .filter((p) => isToday(p.created_at) || isToday(p.merged_at));
+    data.today.closed = [...c1.map((i) => ({ ...i, repoKey: 'dcm' })), ...c2.map((i) => ({ ...i, repoKey: 'market' }))]
+      .filter((i) => !i.pull_request && isToday(i.closed_at));
     const m = (issue.body || '').match(/<!-- dcm-remote-json (\{.*?\}) -->/);
     data.status = m ? JSON.parse(m[1]) : null;
     data.waiting = [...w1, ...w2].sort((a, b) => a.number - b.number);
     data.prs = [...p1.map((p) => ({ ...p, repoKey: 'dcm' })), ...p2.map((p) => ({ ...p, repoKey: 'market' }))];
     data.inprog = [...g1, ...g2];
+    data.attended = att;
     // requests and their results
     const results = {};
     for (const c of comments) {
@@ -185,7 +196,8 @@ async function sendRequest(cmd, label) {
     const c = await api(`repos/${CFG.repos.dcm}/issues/${CFG.requestIssue}/comments`, { method: 'POST', body: { body: 'dcm-remote: ' + cmd + '\n\nSent from DCM Remote.' } });
     pending[String(c.id)] = label;
     toast('Sent. The PC picks it up within a minute.');
-    tab = 'lanes'; await loadAll();
+    if (tab !== 'decide') tab = 'lanes';
+    await loadAll();
   } catch (e) { toast(e.message); }
 }
 
@@ -197,43 +209,145 @@ function pcLine() {
   if (min <= 7) return { text: 'PC online · ' + ago(s.seen), cls: 'ok' };
   return { text: 'PC offline · last seen ' + ago(s.seen), cls: 'bad' };
 }
+function laneOfPr(p) {
+  const m = (p.head && p.head.ref || '').match(/^lane\/([a-z])/);
+  if (m) return m[1].toUpperCase();
+  if (p.repoKey === 'market' && /^harden/.test(p.head.ref)) return 'M';
+  return laneOf(p.labels);
+}
 function viewStatus() {
   const s = data.status; const pc = pcLine();
   let h = `<div class="card"><div class="row"><b>Your PC</b><span class="chip ${pc.cls}">${esc(pc.text)}</span></div>`;
   if (pc.cls !== 'ok') h += '<p class="meta">Requests from the phone wait until the PC is on with the DCM Hub open. Lane status below is from the last report.</p>';
   if (s && s.merge) h += `<p class="meta">Checked merge in progress: ${esc(s.merge)}</p>`;
   if (s && s.gate) h += '<p class="meta">A full test run (gate) is in progress.</p>';
-  h += '</div><h2>Lanes</h2><div class="lanes">';
+  const nb = blockers().length;
+  if (nb) h += `<div class="btns" style="grid-template-columns:1fr"><button class="primary" data-tab="decide">${nb} thing${nb > 1 ? 's' : ''} waiting on your decision</button></div>`;
+  h += '</div><h2>Lanes today</h2>';
   for (const k of ['A', 'B', 'C', 'R', 'M', 'X']) {
     const st = (s && s.lanes && s.lanes[k]) || 'unknown';
-    const cls = st === 'running' ? 'ok' : st.startsWith('stale') ? 'bad' : '';
-    const jobs = data.inprog.filter((i) => laneOf(i.labels) === k);
-    h += `<div class="lane"><b>Lane ${k}</b><span class="meta">${esc(CFG.laneNames[k])}</span><div style="margin-top:6px"><span class="chip ${cls}">${esc(st)}</span></div>`;
-    for (const j of jobs) h += `<div class="meta" style="margin-top:6px">#${j.number} ${esc(j.title)}</div>`;
+    const cls = st === 'running' ? 'ok' : (st.startsWith('stale') || st.startsWith('lock left')) ? 'bad' : '';
+    const now = data.inprog.filter((i) => laneOf(i.labels) === k);
+    const prs = data.today.prs.filter((p) => laneOfPr(p) === k);
+    const closed = data.today.closed.filter((i) => laneOf(i.labels) === k);
+    const asks = data.waiting.filter((i) => laneOf(i.labels) === k).length;
+    const rep = s && s.reports && s.reports['lane-' + k.toLowerCase()];
+    const done = prs.length + closed.length;
+    h += `<div class="card"><div class="row"><div><b>Lane ${k}</b> <span class="meta">${esc(CFG.laneNames[k])}</span></div><span class="chip ${cls}">${esc(st)}</span></div>`;
+    h += `<div class="meta" style="margin-top:4px">${done ? done + ' done today' : 'Nothing finished today'}${asks ? ` · ${asks} question${asks > 1 ? 's' : ''} for you` : ''}${rep ? ' · report written ' + esc(rep) : ''}</div>`;
+    if (now.length) h += '<div style="margin-top:8px;font-size:14px"><b>Working on</b>' + now.map((i) => `<div>#${i.number} ${esc(i.title)}</div>`).join('') + '</div>';
+    const key = 'lane-' + k;
+    if (done && open[key]) {
+      h += '<div style="margin-top:8px;font-size:14px"><b>Done today</b>';
+      for (const p of prs) {
+        const state = p.merged_at ? 'merged' : p.state === 'open' ? 'waiting to merge' : 'closed';
+        const c = card(p.body);
+        h += `<div style="margin-top:6px"><span class="chip ${p.merged_at ? 'ok' : p.state === 'open' ? 'wait' : ''}">${state}</span> PR #${p.number} ${esc(p.title)}${c['What it does'] ? `<div class="meta">${esc(c['What it does'])}</div>` : ''}</div>`;
+      }
+      for (const i of closed) h += `<div style="margin-top:6px"><span class="chip ok">closed</span> #${i.number} ${esc(i.title)}</div>`;
+      h += '</div>';
+    }
+    if (done) h += `<div class="btns" style="grid-template-columns:1fr"><button class="secondary" data-act="toggle" data-key="${key}">${open[key] ? 'Hide' : 'Show'} what was done today</button></div>`;
     h += '</div>';
   }
-  h += '</div>';
-  h += `<h2>Today</h2><div class="card"><div class="row"><span>Waiting on you</span><b>${data.waiting.length}</b></div><div class="row" style="margin-top:6px"><span>Pull requests open</span><b>${data.prs.length}</b></div></div>`;
+  const other = data.today.prs.filter((p) => !laneOfPr(p));
+  if (other.length) {
+    h += '<h2>Other work today</h2><div class="card" style="font-size:14px">' + other.map((p) => `<div style="margin-top:4px"><span class="chip ${p.merged_at ? 'ok' : p.state === 'open' ? 'wait' : ''}">${p.merged_at ? 'merged' : p.state === 'open' ? 'open' : 'closed'}</span> ${p.repoKey === 'market' ? 'Market' : 'DCM'} PR #${p.number} ${esc(p.title)}</div>`).join('') + '</div>';
+  }
   return h;
 }
-function viewWaiting() {
-  if (!data.waiting.length) return '<div class="empty">Nothing is waiting on you.</div>';
-  return data.waiting.map((i) => {
-    const key = i.repoKey + '#' + i.number; const c = card(i.body); const lane = laneOf(i.labels);
-    let h = `<div class="card"><div class="meta">${i.repoKey === 'market' ? 'Market' : 'DCM'} #${i.number}${lane ? ' · Lane ' + lane : ''} · updated ${ago(i.updated_at)}</div><h3>${esc(i.title)}</h3>`;
-    h += cardHtml(c, ['Needs you']);
-    if (open[key]) {
-      h += cardHtml(c, ['What it does', 'Why it matters', 'Status']);
-      h += `<div class="q" id="q-${esc(key)}">Loading the latest comment…</div>`;
-      h += `<textarea id="ans-${esc(key)}" placeholder="Your answer"></textarea>`;
-      h += `<label class="check"><input type="checkbox" id="rel-${esc(key)}" ${lane ? 'checked' : ''}> Let the lane carry on (removes the "needs Anthony" tag)</label>`;
-      h += `<div class="btns"><button class="secondary" data-act="toggle" data-key="${esc(key)}">Close</button><button class="primary" data-act="answer" data-key="${esc(key)}">Send answer</button></div>`;
-      h += `<p class="meta"><a href="${esc(i.html_url)}" target="_blank" rel="noopener">Open on GitHub</a></p>`;
-    } else {
-      h += `<div class="btns" style="grid-template-columns:1fr"><button class="secondary" data-act="toggle" data-key="${esc(key)}">Read and answer</button></div>`;
+function blockers() {
+  const out = []; const s = data.status;
+  for (const l of (s && s.locks) || []) if (!l.live) out.push({ kind: 'lock', l });
+  for (const i of data.attended) out.push({ kind: 'go', i });
+  if (s && s.liveKnown && pcLine().cls === 'ok') {
+    for (const i of data.inprog) {
+      const k = laneOf(i.labels);
+      if (k && s.lanes && s.lanes[k] && s.lanes[k] !== 'running') out.push({ kind: 'stuck', i, lane: k });
     }
-    return h + '</div>';
-  }).join('');
+  }
+  const qs = data.waiting.filter((i) => !data.attended.some((a) => a.number === i.number));
+  for (const i of qs) if (laneOf(i.labels)) out.push({ kind: 'q', i });
+  for (const i of qs) if (!laneOf(i.labels)) out.push({ kind: 'q', i, other: true });
+  return out;
+}
+const LOCKTEXT = {
+  access: ['No lane can start', "Lane X's lock was left behind"],
+  gate: ['Full test runs are blocked', 'The test-gate lock was left behind'],
+  'remote-merge': ['Merges from the phone are blocked', 'The checked-merge lock was left behind'],
+};
+function viewLock(l) {
+  const online = pcLine().cls === 'ok';
+  const lane = /^lane-/.test(l.name) ? l.name.slice(5).toUpperCase() : null;
+  const [title, what] = lane ? [`Lane ${lane} can't start`, `Lane ${lane}'s lock was left behind`] : LOCKTEXT[l.name] || [l.name, 'A lock was left behind'];
+  const busy = Object.values(pending).includes('clear ' + l.name);
+  return `<div class="card"><div class="meta">Lock · set ${esc(l.hours)} h ago</div><h3>${esc(title)}</h3>
+    <p style="margin:4px 0 0;font-size:14px">${esc(what)}: no session is running for it on the PC, so it is only in the way.</p>
+    ${online ? '' : '<div class="warn">Your PC is offline. Clearing waits until it is back.</div>'}
+    <div class="btns" style="grid-template-columns:1fr"><button class="primary" data-act="clear" data-lock="${esc(l.name)}" ${busy || !online ? 'disabled' : ''}>${busy ? 'Sent…' : 'Clear the lock'}</button></div>
+    <p class="meta">The PC checks again that nothing is running before it clears it, and keeps a copy.</p></div>`;
+}
+function viewGo(i) {
+  const c = card(i.body); const key = 'dcm#' + i.number;
+  const sent = Object.values(pending).includes('go ' + key);
+  return `<div class="card"><div class="meta">DCM #${i.number} · Lane X · asked ${ago(i.updated_at)}</div><h3>${esc(i.title)}</h3>
+    <p style="margin:4px 0 0;font-size:14px">Lane X is ready to start this job, which changes sign-in or keys. It waits about 15 minutes for your go, then skips it.</p>
+    ${cardHtml(c, ['What it does'])}
+    <div class="btns"><a class="secondary" style="display:flex;align-items:center;justify-content:center;border-radius:10px;background:var(--idle-bg);color:var(--ink);text-decoration:none;font-weight:600" href="${esc(i.html_url)}" target="_blank" rel="noopener">Read it</a>
+    <button class="primary" data-act="go" data-key="${key}" ${sent ? 'disabled' : ''}>${sent ? 'Go sent' : 'Go: start it'}</button></div></div>`;
+}
+function viewStuck(b) {
+  const i = b.i; const key = i.repoKey + '#' + i.number;
+  const pr = data.prs.find((p) => p.repoKey === i.repoKey && new RegExp('#' + i.number + '\\b').test(p.body || ''));
+  return `<div class="card"><div class="meta">${i.repoKey === 'market' ? 'Market' : 'DCM'} #${i.number} · Lane ${b.lane}</div><h3>${esc(i.title)}</h3>
+    <p style="margin:4px 0 0;font-size:14px">This job is still marked "being worked on", but Lane ${b.lane} is not running. Lanes skip anything marked that way, so it is stuck.</p>
+    ${pr ? `<div class="warn">PR #${pr.number} already exists for it. Merging that PR closes it; release it only if that PR is abandoned.</div>` : ''}
+    <div class="btns" style="grid-template-columns:1fr"><button class="${pr ? 'secondary' : 'primary'}" data-act="release" data-key="${key}">Release it so the lane picks it up again</button></div></div>`;
+}
+function parseChoices(text) {
+  const clean = (x) => x.replace(/\*\*/g, '').replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/`/g, '').trim().replace(/[.\s]+$/, '').slice(0, 110);
+  let best = [], cur = [];
+  for (const ln of (text || '').split('\n')) {
+    const m = ln.match(/^\s*(?:[-*]\s*)?(?:\*\*)?\s*(?:option\s+)?\(?([1-6]|[a-f])[.):]\)?\s*(?:\*\*)?\s*(.{3,})$/i);
+    if (m) cur.push({ id: m[1].toLowerCase(), label: clean(m[2]) });
+    else if (ln.trim()) { if (cur.length >= 2) best = cur; cur = []; }
+  }
+  if (cur.length >= 2) best = cur;
+  const ids = best.map((c) => c.id).join('');
+  return ('123456'.startsWith(ids) || 'abcdef'.startsWith(ids)) ? best.slice(0, 6) : [];
+}
+function viewQuestion(i) {
+  const key = i.repoKey + '#' + i.number; const c = card(i.body); const lane = laneOf(i.labels);
+  let h = `<div class="card"><div class="meta">${i.repoKey === 'market' ? 'Market' : 'DCM'} #${i.number}${lane ? ' · Lane ' + lane : ''} · updated ${ago(i.updated_at)}</div><h3>${esc(i.title)}</h3>`;
+  h += cardHtml(c, ['Needs you']);
+  if (!open[key]) return h + `<div class="btns" style="grid-template-columns:1fr"><button class="secondary" data-act="toggle" data-key="${esc(key)}">Read and decide</button></div></div>`;
+  h += cardHtml(c, ['What it does', 'Why it matters', 'Status']);
+  const q = qcache[key];
+  h += `<div class="q">${q ? esc(q.text) : 'Loading the latest comment…'}</div>`;
+  if (q && (q.choices.length || q.rec)) {
+    h += '<div class="meta" style="margin-top:6px">Quick decision</div><div style="display:grid;gap:8px;margin-top:6px">';
+    if (q.rec) h += `<button class="primary" data-act="choose" data-key="${esc(key)}" data-choice="rec">Go with your recommendation</button>`;
+    for (const ch of q.choices) h += `<button class="secondary" style="text-align:left" data-act="choose" data-key="${esc(key)}" data-choice="${esc(ch.id)}">${esc(ch.id)}. ${esc(ch.label)}</button>`;
+    h += '</div>';
+  }
+  h += `<div class="meta" style="margin-top:10px">Or write your own answer</div><textarea id="ans-${esc(key)}" placeholder="Your answer"></textarea>`;
+  h += `<label class="check"><input type="checkbox" id="rel-${esc(key)}" ${lane ? 'checked' : ''}> Let the lane carry on (removes the "needs Anthony" tag)</label>`;
+  h += `<div class="btns"><button class="secondary" data-act="toggle" data-key="${esc(key)}">Close</button><button class="primary" data-act="answer" data-key="${esc(key)}">Send answer</button></div>`;
+  h += `<p class="meta"><a href="${esc(i.html_url)}" target="_blank" rel="noopener">Open on GitHub</a></p>`;
+  return h + '</div>';
+}
+function viewDecide() {
+  const all = blockers();
+  if (!all.length) return '<div class="empty">Nothing is waiting on you. No lane is blocked.</div>';
+  const sec = (title, items, fn) => (items.length ? `<h2>${title}</h2>` + items.map(fn).join('') : '');
+  let h = '';
+  h += sec('Locks in the way', all.filter((b) => b.kind === 'lock'), (b) => viewLock(b.l));
+  h += sec('Lane X needs your go', all.filter((b) => b.kind === 'go'), (b) => viewGo(b.i));
+  h += sec('Stuck jobs', all.filter((b) => b.kind === 'stuck'), viewStuck);
+  h += sec('Questions holding up a lane', all.filter((b) => b.kind === 'q' && !b.other), (b) => viewQuestion(b.i));
+  h += sec('Other questions for you', all.filter((b) => b.kind === 'q' && b.other), (b) => viewQuestion(b.i));
+  if (data.status && !data.status.locks) h += '<p class="meta">Lock checks appear once the PC runs the updated watcher (reopen the DCM Hub).</p>';
+  return h;
 }
 function isAccessPr(p) { return /^lane\/x/.test(p.head.ref) || (p.labels || []).some((l) => l.name === 'access'); }
 function viewMerges() {
@@ -289,29 +403,47 @@ function render() {
   $('#nav').classList.remove('hide');
   const pc = pcLine(); $('#pc').textContent = data.loadedAt ? pc.text : 'Loading…';
   document.querySelectorAll('nav button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
-  const bw = $('#bWait'); bw.textContent = data.waiting.length; bw.classList.toggle('hide', !data.waiting.length);
+  const nb = data.loadedAt ? blockers().length : 0; const bw = $('#bWait'); bw.textContent = nb; bw.classList.toggle('hide', !nb);
   const bp = $('#bPr'); bp.textContent = data.prs.length; bp.classList.toggle('hide', !data.prs.length);
   let h = data.error ? `<div class="warn">${esc(data.error)}</div>` : '';
   if (!data.loadedAt && !data.error) h += '<div class="empty">Loading…</div>';
-  else h += ({ status: viewStatus, waiting: viewWaiting, merges: viewMerges, lanes: viewLanes })[tab]();
+  else h += ({ status: viewStatus, decide: viewDecide, merges: viewMerges, lanes: viewLanes })[tab]();
   main.innerHTML = h;
-  for (const key of Object.keys(open)) if (open[key] && tab === 'waiting') loadQuestion(key);
+  for (const key of Object.keys(open)) if (open[key] && tab === 'decide' && !qcache[key]) loadQuestion(key);
 }
 
 async function loadQuestion(key) {
-  const el = document.getElementById('q-' + key); if (!el || el.dataset.done) return;
-  el.dataset.done = '1';
+  if (loadQuestion.busy[key]) return; loadQuestion.busy[key] = true;
   const [rk, n] = key.split('#');
   try {
     const cs = await api(`repos/${CFG.repos[rk]}/issues/${n}/comments?per_page=100`);
     const last = cs.length ? cs[cs.length - 1] : null;
-    el.textContent = last ? `Latest comment (${ago(last.created_at)}):\n\n${last.body}` : 'No comments yet. The question is in the card above; open it on GitHub for the full text.';
-  } catch (e) { el.textContent = e.message; }
+    const issue = data.waiting.find((i) => i.repoKey + '#' + i.number === key);
+    const text = last ? last.body : (issue ? issue.body : '');
+    qcache[key] = {
+      text: last ? `Latest comment (${ago(last.created_at)}):\n\n${last.body.replace(/\*\*/g, '')}` : 'No comments yet. The question is in the card above; open it on GitHub for the full text.',
+      choices: parseChoices(text), rec: /recommend/i.test(text || ''),
+    };
+  } catch (e) { qcache[key] = { text: e.message, choices: [], rec: false }; }
+  loadQuestion.busy[key] = false; render();
+}
+loadQuestion.busy = {};
+
+async function postAnswer(key, text, release, btn) {
+  const [rk, n] = key.split('#'); const repo = CFG.repos[rk];
+  if (btn) btn.disabled = true;
+  try {
+    await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: text + '\n\n— Anthony (DCM Remote)' } });
+    if (release) { try { await api(`repos/${repo}/issues/${n}/labels/needs-anthony`, { method: 'DELETE' }); } catch (e) {} }
+    open[key] = false; delete qcache[key];
+    toast(release ? 'Decision sent. The lane picks it up next time it runs.' : 'Answer sent.');
+    await loadAll();
+  } catch (e) { if (btn) btn.disabled = false; toast(e.message); }
 }
 
 // ---------- actions ----------
 document.addEventListener('click', async (ev) => {
-  const t = ev.target.closest('[data-act], nav button'); if (!t) return;
+  const t = ev.target.closest('[data-act], [data-tab]'); if (!t) return;
   if (t.dataset.tab) { tab = t.dataset.tab; render(); window.scrollTo(0, 0); return; }
   const act = t.dataset.act; const key = t.dataset.key;
   if (act === 'save') {
@@ -331,15 +463,36 @@ document.addEventListener('click', async (ev) => {
     open[key] = !open[key]; render();
   } else if (act === 'answer') {
     const text = (document.getElementById('ans-' + key).value || '').trim();
-    if (!text) return toast('Write an answer first.');
-    const release = document.getElementById('rel-' + key).checked;
-    const [rk, n] = key.split('#'); const repo = CFG.repos[rk];
+    if (!text) return toast('Write an answer first, or tap a quick decision.');
+    postAnswer(key, text, document.getElementById('rel-' + key).checked, t);
+  } else if (act === 'choose') {
+    const q = qcache[key]; const ch = t.dataset.choice;
+    const rel = document.getElementById('rel-' + key);
+    const extra = (document.getElementById('ans-' + key).value || '').trim();
+    let text = ch === 'rec' ? 'Decision: go with the recommendation above.' : `Decision: option ${ch}${q ? ' — ' + ((q.choices.find((c) => c.id === ch) || {}).label || '') : ''}.`;
+    if (extra) text += '\n\n' + extra;
+    if (!confirm(text.split('\n')[0] + '\n\nSend this decision?')) return;
+    postAnswer(key, text, rel ? rel.checked : false, t);
+  } else if (act === 'clear') {
+    const name = t.dataset.lock;
+    if (!confirm('Ask the PC to clear the ' + name + ' lock? It checks first that nothing is running.')) return;
+    sendRequest('clear-lock ' + name, 'clear ' + name);
+  } else if (act === 'go') {
+    const n = key.split('#')[1];
+    if (!confirm('Tell Lane X to start #' + n + ' now? It changes sign-in or keys.')) return;
     t.disabled = true;
     try {
-      await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: text + '\n\n— Anthony (DCM Remote)' } });
-      if (release) await api(`repos/${repo}/issues/${n}/labels/needs-anthony`, { method: 'DELETE' });
-      open[key] = false; toast(release ? 'Answer sent. The lane can pick it up next time it runs.' : 'Answer sent.');
-      await loadAll();
+      await api(`repos/${CFG.repos.dcm}/issues/${n}/comments`, { method: 'POST', body: { body: 'attended: go\n\n— Anthony (DCM Remote)' } });
+      pending['go-' + n] = 'go ' + key; toast('Go sent. Lane X checks every minute.'); await loadAll();
+    } catch (e) { t.disabled = false; toast(e.message); }
+  } else if (act === 'release') {
+    const [rk, n] = key.split('#'); const repo = CFG.repos[rk];
+    if (!confirm('Release #' + n + '? The lane will pick it up again the next time it runs.')) return;
+    t.disabled = true;
+    try {
+      await api(`repos/${repo}/issues/${n}/labels/in-progress`, { method: 'DELETE' });
+      await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: 'Released from DCM Remote: the lane was not running, so the "being worked on" mark was left behind. The lane can pick this up again.\n\n— Anthony (DCM Remote)' } });
+      toast('Released.'); await loadAll();
     } catch (e) { t.disabled = false; toast(e.message); }
   } else if (act === 'merge') {
     const p = data.prs.find((x) => x.repoKey + '#' + x.number === key); if (!p) return;
@@ -362,7 +515,7 @@ document.addEventListener('click', async (ev) => {
 
 render();
 if (token) loadAll();
-setInterval(() => { if (token && document.visibilityState === 'visible') loadAll(); }, Object.keys(pending).length ? 15000 : 30000);
+(function tick() { setTimeout(async () => { if (token && document.visibilityState === 'visible') await loadAll(); tick(); }, Object.keys(pending).length ? 15000 : 45000); })();
 document.addEventListener('visibilitychange', () => { if (token && document.visibilityState === 'visible') loadAll(); });
 </script>
 </body>
