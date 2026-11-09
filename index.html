@@ -90,7 +90,7 @@ const CFG = {
   owner: 'TheDreamCultureMovement',
   repos: { dcm: 'TheDreamCultureMovement/dream-culture-movement', market: 'TheDreamCultureMovement/dream-culture-market' },
   requestIssue: 714,
-  laneNames: { A: 'Scripts & Analytics', B: 'Visuals & Video', C: 'Delivery & System', R: 'Tool Watch', M: 'Market website', X: 'Access (Tab 8.2)' },
+  laneNames: { A: 'Scripts & Analytics', B: 'Visuals & Video', C: 'Delivery & System', D: 'Revenue (M7)', R: 'Tool Watch', M: 'Market website', X: 'Access (Tab 8.2)' },
 };
 const KEY = 'dcmRemoteToken';
 let token = null;
@@ -224,7 +224,7 @@ function viewStatus() {
   const nb = blockers().length;
   if (nb) h += `<div class="btns" style="grid-template-columns:1fr"><button class="primary" data-tab="decide">${nb} thing${nb > 1 ? 's' : ''} waiting on your decision</button></div>`;
   h += '</div><h2>Lanes today</h2>';
-  for (const k of ['A', 'B', 'C', 'R', 'M', 'X']) {
+  for (const k of ['A', 'B', 'C', 'D', 'R', 'M', 'X']) {
     const st = (s && s.lanes && s.lanes[k]) || 'unknown';
     const cls = st === 'running' ? 'ok' : (st.startsWith('stale') || st.startsWith('lock left')) ? 'bad' : '';
     const now = data.inprog.filter((i) => laneOf(i.labels) === k);
@@ -368,7 +368,7 @@ function viewLanes() {
   const now = new Date(); const mins = now.getHours() * 60 + now.getMinutes();
   let h = '<div class="card"><h3>Start lanes</h3><p class="meta">The PC keeps its rules: Lane C only from 6 pm to 7 am; Lane X starts no new job after 4:30 pm; nothing starts while Lane X runs.</p>';
   h += '<button class="primary" style="margin-top:8px" data-act="start" data-lane="all">Start all lanes</button><div class="btns">';
-  for (const k of ['A', 'B', 'C', 'R', 'M']) h += `<button class="secondary" data-act="start" data-lane="${k}" ${run(k) ? 'disabled' : ''}>Lane ${k}${run(k) ? ' (running)' : ''}</button>`;
+  for (const k of ['A', 'B', 'C', 'D', 'R', 'M']) h += `<button class="secondary" data-act="start" data-lane="${k}" ${run(k) ? 'disabled' : ''}>Lane ${k}${run(k) ? ' (running)' : ''}</button>`;
   h += `<button class="secondary" data-act="start" data-lane="X" ${run('X') || mins >= 990 ? 'disabled' : ''}>Lane X${run('X') ? ' (running)' : mins >= 990 ? ' (after 4:30)' : ''}</button></div></div>`;
   h += '<h2>Recent requests</h2>';
   if (!data.requests.length) h += '<div class="empty">No requests in the last 4 days.</div>';
