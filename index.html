@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DCM Remote</title>
+<meta name="description" content="Run the DCM lanes from your phone.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="DCM Remote">
+<meta name="theme-color" content="#F7F4EE" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151515" media="(prefers-color-scheme: dark)">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" href="icon-192.png">
+<style>
+  :root {
+    --bg: #F7F4EE; --card: #FFFFFF; --ink: #1F1F1F; --muted: #66625B; --line: #E4DED2;
+    --accent: #2F5D50; --accent-ink: #FFFFFF; --ok-bg: #D6EAD9; --ok: #1E4D2B;
+    --bad-bg: #F6D4D1; --bad: #7A1F17; --wait-bg: #F3E6C8; --wait: #6B4E12; --idle-bg: #ECE7DC;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151515; --card: #1F1F1F; --ink: #F2EFE9; --muted: #A8A39A; --line: #34312C;
+      --accent: #6FB39C; --accent-ink: #0E1A16; --ok-bg: #1E3A27; --ok: #A8DDB5;
+      --bad-bg: #4A1E1A; --bad: #F2B3AC; --wait-bg: #3D3017; --wait: #EED39A; --idle-bg: #2A2824;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body { font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; -webkit-text-size-adjust: 100%; }
+  header { position: sticky; top: 0; z-index: 5; background: var(--bg); padding: calc(env(safe-area-inset-top) + 10px) 16px 8px; border-bottom: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  header h1 { font-size: 20px; margin: 0; }
+  header .pc { font-size: 13px; color: var(--muted); text-align: right; }
+  main { padding: 12px 16px calc(env(safe-area-inset-bottom) + 88px); max-width: 640px; margin: 0 auto; }
+  nav { position: fixed; bottom: 0; left: 0; right: 0; z-index: 5; display: grid; grid-template-columns: repeat(4, 1fr); background: var(--card); border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom); }
+  nav button { background: none; border: 0; color: var(--muted); font: inherit; font-size: 12px; padding: 8px 2px 10px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  nav button svg { width: 24px; height: 24px; }
+  nav button[aria-selected="true"] { color: var(--accent); font-weight: 600; }
+  nav .badge { background: var(--bad); color: var(--card); border-radius: 9px; font-size: 11px; padding: 0 6px; margin-left: 2px; }
+  h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 0 8px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; margin-bottom: 10px; }
+  .card h3 { font-size: 16px; margin: 0 0 4px; }
+  .meta { font-size: 13px; color: var(--muted); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .chip { display: inline-block; font-size: 13px; padding: 2px 9px; border-radius: 999px; background: var(--idle-bg); color: var(--muted); white-space: nowrap; }
+  .chip.ok { background: var(--ok-bg); color: var(--ok); } .chip.bad { background: var(--bad-bg); color: var(--bad); } .chip.wait { background: var(--wait-bg); color: var(--wait); }
+  .lanes { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .lane { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; }
+  .lane b { display: block; font-size: 15px; }
+  .cardtext p { margin: 6px 0 0; font-size: 14px; } .cardtext p span { color: var(--muted); }
+  button.primary, button.secondary { font: inherit; font-weight: 600; border-radius: 10px; padding: 11px 14px; border: 0; width: 100%; min-height: 44px; }
+  button.primary { background: var(--accent); color: var(--accent-ink); }
+  button.secondary { background: var(--idle-bg); color: var(--ink); }
+  button:disabled { opacity: .45; }
+  .btns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+  textarea, input[type=password], input[type=text] { width: 100%; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 10px; }
+  textarea { min-height: 96px; }
+  label.check { display: flex; gap: 10px; align-items: flex-start; font-size: 14px; margin: 10px 0; }
+  label.check input { width: 22px; height: 22px; flex: none; margin-top: 1px; }
+  .q { white-space: pre-wrap; font-size: 14px; background: var(--bg); border-radius: 10px; padding: 10px; margin: 8px 0; max-height: 280px; overflow: auto; }
+  a { color: var(--accent); }
+  .empty { color: var(--muted); text-align: center; padding: 24px 8px; }
+  .warn { background: var(--wait-bg); color: var(--wait); border-radius: 10px; padding: 8px 10px; font-size: 14px; margin-top: 8px; }
+  .toast { position: fixed; left: 16px; right: 16px; bottom: calc(env(safe-area-inset-bottom) + 76px); background: var(--ink); color: var(--bg); padding: 12px 14px; border-radius: 12px; font-size: 14px; z-index: 9; display: none; }
+  dialog { border: 0; border-radius: 16px; padding: 18px; width: min(92vw, 480px); background: var(--card); color: var(--ink); }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  ol.steps { padding-left: 20px; } ol.steps li { margin: 6px 0; }
+  .hide { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DCM Remote</h1>
+  <div class="pc" id="pc">…</div>
+</header>
+<main id="main"></main>
+<nav id="nav" class="hide">
+  <button data-tab="status" aria-selected="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Status</button>
+  <button data-tab="waiting"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg><span>Waiting <span class="badge hide" id="bWait"></span></span></button>
+  <button data-tab="merges"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="2.5"/><circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M6 8.5v7M8 6c6 0 8 2 8 3.5"/></svg><span>Merges <span class="badge hide" id="bPr"></span></span></button>
+  <button data-tab="lanes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 4v16M12 4v16M19 4v16"/></svg>Lanes</button>
+</nav>
+<div class="toast" id="toast"></div>
+<dialog id="dlg"></dialog>
+
+<script>
+const CFG = {
+  owner: 'TheDreamCultureMovement',
+  repos: { dcm: 'TheDreamCultureMovement/dream-culture-movement', market: 'TheDreamCultureMovement/dream-culture-market' },
+  requestIssue: 714,
+  laneNames: { A: 'Scripts & Analytics', B: 'Visuals & Video', C: 'Delivery & System', R: 'Tool Watch', M: 'Market website', X: 'Access (Tab 8.2)' },
+};
+const KEY = 'dcmRemoteToken';
+let token = null;
+try { token = localStorage.getItem(KEY); } catch (e) { token = null; }
+let tab = 'status';
+const data = { status: null, waiting: [], prs: [], inprog: [], requests: [], loadedAt: 0, error: '' };
+const open = {};          // expanded items
+const pending = {};       // request id -> label, until a result arrives
+
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function ago(iso) {
+  if (!iso) return 'never';
+  const m = Math.round((Date.now() - new Date(iso).getTime()) / 60000);
+  if (m < 1) return 'just now';
+  if (m < 60) return m + ' min ago';
+  const h = Math.round(m / 60); if (h < 48) return h + ' h ago';
+  return Math.round(h / 24) + ' days ago';
+}
+function toast(msg) { const t = $('#toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => (t.style.display = 'none'), 4000); }
+
+async function api(path, opts = {}) {
+  const res = await fetch('https://api.github.com/' + path, {
+    method: opts.method || 'GET',
+    headers: { Authorization: 'Bearer ' + token, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', ...(opts.body ? { 'Content-Type': 'application/json' } : {}) },
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+    cache: 'no-store',
+  });
+  if (res.status === 401) { throw new Error('GitHub refused the key. It may have expired: tap "Change key" on the Lanes tab.'); }
+  if (!res.ok && res.status !== 204) { let m = ''; try { m = (await res.json()).message; } catch (e) {} throw new Error('GitHub said ' + res.status + (m ? ': ' + m : '')); }
+  return res.status === 204 ? null : res.json();
+}
+
+function card(body) {
+  const out = {};
+  if (!body) return out;
+  const i = body.search(/^##\s+In plain words/m);
+  if (i < 0) return out;
+  for (const line of body.slice(i).split('\n').slice(1)) {
+    if (/^\s*#/.test(line)) break;
+    const m = line.match(/^\s*[-*]?\s*\**\s*(What it does|Why it matters|Status|Needs you)\s*:\s*\**\s*(.*)$/);
+    if (m) out[m[1]] = m[2].trim();
+  }
+  return out;
+}
+function laneOf(labels) {
+  const l = (labels || []).map((x) => x.name).find((n) => /^lane-[a-z]$/.test(n));
+  return l ? l.slice(5).toUpperCase() : null;
+}
+function cardHtml(c, keys) {
+  return '<div class="cardtext">' + keys.filter((k) => c[k]).map((k) => `<p><span>${esc(k)}:</span> ${esc(c[k])}</p>`).join('') + '</div>';
+}
+
+// ---------- loading ----------
+async function issuesIn(repo, label) {
+  const list = await api(`repos/${repo}/issues?state=open&labels=${encodeURIComponent(label)}&per_page=100`);
+  return list.filter((i) => !i.pull_request).map((i) => ({ ...i, repoKey: repo === CFG.repos.market ? 'market' : 'dcm' }));
+}
+async function loadAll() {
+  data.error = '';
+  try {
+    const R = CFG.repos;
+    const [issue, comments, w1, w2, p1, p2, g1, g2] = await Promise.all([
+      api(`repos/${R.dcm}/issues/${CFG.requestIssue}`),
+      api(`repos/${R.dcm}/issues/${CFG.requestIssue}/comments?per_page=100&since=${new Date(Date.now() - 4 * 864e5).toISOString()}`),
+      issuesIn(R.dcm, 'needs-anthony'), issuesIn(R.market, 'needs-anthony'),
+      api(`repos/${R.dcm}/pulls?state=open&per_page=100`), api(`repos/${R.market}/pulls?state=open&per_page=100`),
+      issuesIn(R.dcm, 'in-progress'), issuesIn(R.market, 'in-progress'),
+    ]);
+    const m = (issue.body || '').match(/<!-- dcm-remote-json (\{.*?\}) -->/);
+    data.status = m ? JSON.parse(m[1]) : null;
+    data.waiting = [...w1, ...w2].sort((a, b) => a.number - b.number);
+    data.prs = [...p1.map((p) => ({ ...p, repoKey: 'dcm' })), ...p2.map((p) => ({ ...p, repoKey: 'market' }))];
+    data.inprog = [...g1, ...g2];
+    // requests and their results
+    const results = {};
+    for (const c of comments) {
+      const r = (c.body || '').match(/^dcm-remote-result for (\d+): (\w+)/);
+      if (r) results[r[1]] = { verdict: r[2], text: c.body.split('\n').slice(1).join('\n').trim(), at: c.created_at };
+    }
+    data.requests = comments.filter((c) => /^dcm-remote:/.test(c.body || '') && c.user.login === CFG.owner)
+      .map((c) => ({ id: String(c.id), cmd: c.body.split('\n')[0].replace(/^dcm-remote:\s*/, ''), at: c.created_at, result: results[String(c.id)] || null }))
+      .reverse();
+    for (const r of data.requests) if (r.result && pending[r.id] && !['started'].includes(r.result.verdict)) delete pending[r.id];
+    data.loadedAt = Date.now();
+  } catch (e) { data.error = e.message || String(e); }
+  render();
+}
+
+async function sendRequest(cmd, label) {
+  try {
+    const c = await api(`repos/${CFG.repos.dcm}/issues/${CFG.requestIssue}/comments`, { method: 'POST', body: { body: 'dcm-remote: ' + cmd + '\n\nSent from DCM Remote.' } });
+    pending[String(c.id)] = label;
+    toast('Sent. The PC picks it up within a minute.');
+    tab = 'lanes'; await loadAll();
+  } catch (e) { toast(e.message); }
+}
+
+// ---------- screens ----------
+function pcLine() {
+  const s = data.status;
+  if (!s || !s.seen) return { text: 'PC: not reported yet', cls: 'wait' };
+  const min = (Date.now() - new Date(s.seen).getTime()) / 60000;
+  if (min <= 7) return { text: 'PC online · ' + ago(s.seen), cls: 'ok' };
+  return { text: 'PC offline · last seen ' + ago(s.seen), cls: 'bad' };
+}
+function viewStatus() {
+  const s = data.status; const pc = pcLine();
+  let h = `<div class="card"><div class="row"><b>Your PC</b><span class="chip ${pc.cls}">${esc(pc.text)}</span></div>`;
+  if (pc.cls !== 'ok') h += '<p class="meta">Requests from the phone wait until the PC is on with the DCM Hub open. Lane status below is from the last report.</p>';
+  if (s && s.merge) h += `<p class="meta">Checked merge in progress: ${esc(s.merge)}</p>`;
+  if (s && s.gate) h += '<p class="meta">A full test run (gate) is in progress.</p>';
+  h += '</div><h2>Lanes</h2><div class="lanes">';
+  for (const k of ['A', 'B', 'C', 'R', 'M', 'X']) {
+    const st = (s && s.lanes && s.lanes[k]) || 'unknown';
+    const cls = st === 'running' ? 'ok' : st.startsWith('stale') ? 'bad' : '';
+    const jobs = data.inprog.filter((i) => laneOf(i.labels) === k);
+    h += `<div class="lane"><b>Lane ${k}</b><span class="meta">${esc(CFG.laneNames[k])}</span><div style="margin-top:6px"><span class="chip ${cls}">${esc(st)}</span></div>`;
+    for (const j of jobs) h += `<div class="meta" style="margin-top:6px">#${j.number} ${esc(j.title)}</div>`;
+    h += '</div>';
+  }
+  h += '</div>';
+  h += `<h2>Today</h2><div class="card"><div class="row"><span>Waiting on you</span><b>${data.waiting.length}</b></div><div class="row" style="margin-top:6px"><span>Pull requests open</span><b>${data.prs.length}</b></div></div>`;
+  return h;
+}
+function viewWaiting() {
+  if (!data.waiting.length) return '<div class="empty">Nothing is waiting on you.</div>';
+  return data.waiting.map((i) => {
+    const key = i.repoKey + '#' + i.number; const c = card(i.body); const lane = laneOf(i.labels);
+    let h = `<div class="card"><div class="meta">${i.repoKey === 'market' ? 'Market' : 'DCM'} #${i.number}${lane ? ' · Lane ' + lane : ''} · updated ${ago(i.updated_at)}</div><h3>${esc(i.title)}</h3>`;
+    h += cardHtml(c, ['Needs you']);
+    if (open[key]) {
+      h += cardHtml(c, ['What it does', 'Why it matters', 'Status']);
+      h += `<div class="q" id="q-${esc(key)}">Loading the latest comment…</div>`;
+      h += `<textarea id="ans-${esc(key)}" placeholder="Your answer"></textarea>`;
+      h += `<label class="check"><input type="checkbox" id="rel-${esc(key)}" ${lane ? 'checked' : ''}> Let the lane carry on (removes the "needs Anthony" tag)</label>`;
+      h += `<div class="btns"><button class="secondary" data-act="toggle" data-key="${esc(key)}">Close</button><button class="primary" data-act="answer" data-key="${esc(key)}">Send answer</button></div>`;
+      h += `<p class="meta"><a href="${esc(i.html_url)}" target="_blank" rel="noopener">Open on GitHub</a></p>`;
+    } else {
+      h += `<div class="btns" style="grid-template-columns:1fr"><button class="secondary" data-act="toggle" data-key="${esc(key)}">Read and answer</button></div>`;
+    }
+    return h + '</div>';
+  }).join('');
+}
+function isAccessPr(p) { return /^lane\/x/.test(p.head.ref) || (p.labels || []).some((l) => l.name === 'access'); }
+function viewMerges() {
+  if (!data.prs.length) return '<div class="empty">No pull requests are open.</div>';
+  return data.prs.map((p) => {
+    const c = card(p.body); const key = p.repoKey + '#' + p.number;
+    const busy = Object.values(pending).some((v) => v === 'merge ' + key);
+    let h = `<div class="card"><div class="meta">${p.repoKey === 'market' ? 'Market' : 'DCM'} PR #${p.number} · ${esc(p.head.ref)} · opened ${ago(p.created_at)}</div><h3>${esc(p.title)}</h3>`;
+    h += cardHtml(c, ['What it does', 'Status', 'Needs you']);
+    if (isAccessPr(p)) h += '<div class="warn">Changes sign-in (Lane X). Say yes only to this one PR, after reading it.</div>';
+    if (p.draft) h += '<p class="meta">Draft: not ready to merge.</p>';
+    h += `<div class="btns"><a class="secondary" style="display:flex;align-items:center;justify-content:center;border-radius:10px;background:var(--idle-bg);color:var(--ink);text-decoration:none;font-weight:600" href="${esc(p.html_url)}" target="_blank" rel="noopener">Read on GitHub</a><button class="primary" data-act="merge" data-key="${esc(key)}" ${p.draft || busy ? 'disabled' : ''}>${busy ? 'Sent…' : 'Yes, merge'}</button></div>`;
+    return h + '</div>';
+  }).join('');
+}
+function viewLanes() {
+  const s = data.status; const run = (k) => s && s.lanes && s.lanes[k] === 'running';
+  const now = new Date(); const mins = now.getHours() * 60 + now.getMinutes();
+  let h = '<div class="card"><h3>Start lanes</h3><p class="meta">The PC keeps its rules: Lane C only from 6 pm to 7 am; Lane X starts no new job after 4:30 pm; nothing starts while Lane X runs.</p>';
+  h += '<button class="primary" style="margin-top:8px" data-act="start" data-lane="all">Start all lanes</button><div class="btns">';
+  for (const k of ['A', 'B', 'C', 'R', 'M']) h += `<button class="secondary" data-act="start" data-lane="${k}" ${run(k) ? 'disabled' : ''}>Lane ${k}${run(k) ? ' (running)' : ''}</button>`;
+  h += `<button class="secondary" data-act="start" data-lane="X" ${run('X') || mins >= 990 ? 'disabled' : ''}>Lane X${run('X') ? ' (running)' : mins >= 990 ? ' (after 4:30)' : ''}</button></div></div>`;
+  h += '<h2>Recent requests</h2>';
+  if (!data.requests.length) h += '<div class="empty">No requests in the last 4 days.</div>';
+  for (const r of data.requests.slice(0, 15)) {
+    const v = r.result ? r.result.verdict : 'waiting for the PC';
+    const cls = !r.result ? 'wait' : ['done', 'merged', 'started'].includes(v) ? 'ok' : 'bad';
+    h += `<div class="card"><div class="row"><b>${esc(r.cmd.replace(/ no-press-confirmed$/, ''))}</b><span class="chip ${cls}">${esc(v)}</span></div><div class="meta">${ago(r.at)}</div>`;
+    if (r.result && r.result.text) h += `<div class="q">${esc(r.result.text.replace(/^- /gm, '• '))}</div>`;
+    h += '</div>';
+  }
+  h += '<h2>This phone</h2><div class="card"><p class="meta">Your GitHub key is stored only on this phone.</p><button class="secondary" data-act="forget">Change key</button></div>';
+  return h;
+}
+function viewSetup(msg) {
+  return `<div class="card"><h3>Connect to GitHub</h3>
+  <p class="meta">Do this once, inside the app on your home screen (an iPhone keeps the home-screen app's storage separate from Safari's).</p>
+  <ol class="steps">
+    <li>Open <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub → new fine-grained token</a> (signed in as ${esc(CFG.owner)}).</li>
+    <li>Name: <b>DCM Remote</b>. Expiration: 90 days.</li>
+    <li>Repository access: <b>Only select repositories</b> → dream-culture-movement and dream-culture-market.</li>
+    <li>Permissions → Repository: <b>Issues: Read and write</b>, <b>Pull requests: Read-only</b>. Nothing else.</li>
+    <li>Generate the token, copy it, and paste it below.</li>
+  </ol>
+  <input type="password" id="tok" placeholder="github_pat_…" autocomplete="off" autocapitalize="off" spellcheck="false">
+  <button class="primary" style="margin-top:10px" data-act="save">Connect</button>
+  ${msg ? `<div class="warn">${esc(msg)}</div>` : ''}</div>`;
+}
+
+function render() {
+  const main = $('#main');
+  if (!token) { $('#nav').classList.add('hide'); $('#pc').textContent = ''; main.innerHTML = viewSetup(render.msg); return; }
+  $('#nav').classList.remove('hide');
+  const pc = pcLine(); $('#pc').textContent = data.loadedAt ? pc.text : 'Loading…';
+  document.querySelectorAll('nav button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
+  const bw = $('#bWait'); bw.textContent = data.waiting.length; bw.classList.toggle('hide', !data.waiting.length);
+  const bp = $('#bPr'); bp.textContent = data.prs.length; bp.classList.toggle('hide', !data.prs.length);
+  let h = data.error ? `<div class="warn">${esc(data.error)}</div>` : '';
+  if (!data.loadedAt && !data.error) h += '<div class="empty">Loading…</div>';
+  else h += ({ status: viewStatus, waiting: viewWaiting, merges: viewMerges, lanes: viewLanes })[tab]();
+  main.innerHTML = h;
+  for (const key of Object.keys(open)) if (open[key] && tab === 'waiting') loadQuestion(key);
+}
+
+async function loadQuestion(key) {
+  const el = document.getElementById('q-' + key); if (!el || el.dataset.done) return;
+  el.dataset.done = '1';
+  const [rk, n] = key.split('#');
+  try {
+    const cs = await api(`repos/${CFG.repos[rk]}/issues/${n}/comments?per_page=100`);
+    const last = cs.length ? cs[cs.length - 1] : null;
+    el.textContent = last ? `Latest comment (${ago(last.created_at)}):\n\n${last.body}` : 'No comments yet. The question is in the card above; open it on GitHub for the full text.';
+  } catch (e) { el.textContent = e.message; }
+}
+
+// ---------- actions ----------
+document.addEventListener('click', async (ev) => {
+  const t = ev.target.closest('[data-act], nav button'); if (!t) return;
+  if (t.dataset.tab) { tab = t.dataset.tab; render(); window.scrollTo(0, 0); return; }
+  const act = t.dataset.act; const key = t.dataset.key;
+  if (act === 'save') {
+    const v = ($('#tok').value || '').trim(); if (!v) return;
+    token = v;
+    try {
+      const me = await api('user');
+      if (me.login !== CFG.owner) { token = null; render.msg = `That key belongs to ${me.login}, not ${CFG.owner}.`; return render(); }
+      try { localStorage.setItem(KEY, v); } catch (e) { toast('This phone would not save the key; it lasts until the app closes.'); }
+      render.msg = ''; await loadAll();
+    } catch (e) { token = null; render.msg = e.message; render(); }
+  } else if (act === 'forget') {
+    if (!confirm('Remove the GitHub key from this phone?')) return;
+    try { localStorage.removeItem(KEY); } catch (e) {}
+    token = null; render();
+  } else if (act === 'toggle') {
+    open[key] = !open[key]; render();
+  } else if (act === 'answer') {
+    const text = (document.getElementById('ans-' + key).value || '').trim();
+    if (!text) return toast('Write an answer first.');
+    const release = document.getElementById('rel-' + key).checked;
+    const [rk, n] = key.split('#'); const repo = CFG.repos[rk];
+    t.disabled = true;
+    try {
+      await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: text + '\n\n— Anthony (DCM Remote)' } });
+      if (release) await api(`repos/${repo}/issues/${n}/labels/needs-anthony`, { method: 'DELETE' });
+      open[key] = false; toast(release ? 'Answer sent. The lane can pick it up next time it runs.' : 'Answer sent.');
+      await loadAll();
+    } catch (e) { t.disabled = false; toast(e.message); }
+  } else if (act === 'merge') {
+    const p = data.prs.find((x) => x.repoKey + '#' + x.number === key); if (!p) return;
+    const dcm = p.repoKey === 'dcm';
+    const d = $('#dlg');
+    d.innerHTML = `<h3 style="margin-top:0">Merge ${p.repoKey === 'market' ? 'Market' : 'DCM'} PR #${p.number}?</h3><p>${esc(p.title)}</p>
+      <p class="meta">${dcm ? 'Your PC brings it up to date with main, runs the type check, the tests for the files it changes and every guard test, and merges only if all of that passes. The live app and Training then restart.' : 'GitHub runs the Market checks on the up-to-date branch, and your PC merges only if every check passes. The Market site then restarts.'}</p>
+      ${isAccessPr(p) ? '<div class="warn">This changes sign-in. Merge only after reading it.</div>' : ''}
+      ${dcm ? '<label class="check"><input type="checkbox" id="nopress"> No New AI Ideas press is running right now.</label>' : ''}
+      <div class="btns"><button class="secondary" id="dNo">Cancel</button><button class="primary" id="dYes" ${dcm ? 'disabled' : ''}>Yes, merge</button></div>`;
+    d.showModal();
+    if (dcm) $('#nopress').addEventListener('change', (e) => ($('#dYes').disabled = !e.target.checked));
+    $('#dNo').onclick = () => d.close();
+    $('#dYes').onclick = () => { d.close(); sendRequest(`merge ${key}${dcm ? ' no-press-confirmed' : ''}`, 'merge ' + key); };
+  } else if (act === 'start') {
+    const lane = t.dataset.lane;
+    sendRequest(lane === 'all' ? 'start all' : 'start ' + lane.toLowerCase(), 'start ' + lane);
+  }
+});
+
+render();
+if (token) loadAll();
+setInterval(() => { if (token && document.visibilityState === 'visible') loadAll(); }, Object.keys(pending).length ? 15000 : 30000);
+document.addEventListener('visibilitychange', () => { if (token && document.visibilityState === 'visible') loadAll(); });
+</script>
+</body>
+</html>
