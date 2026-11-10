@@ -73,6 +73,9 @@
   .gauge { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
   .gauge.empty { display: block; }
   .gtext { text-align: right; } .gpct { font-size: 30px; font-weight: 700; line-height: 1.1; }
+  .card.opened { position:relative; } .card.opened > .meta:first-of-type, .card.opened > h3 { padding-right:44px; }
+  .x { position:absolute; top:8px; right:8px; width:36px; height:36px; border:0; border-radius:50%; background:var(--idle-bg); color:var(--ink); font:600 17px/1 inherit; display:flex; align-items:center; justify-content:center; }
+  dialog { position:relative; } dialog > .x { top:10px; right:10px; } dialog h3 { padding-right:44px; }
   .seg2 { display:grid; grid-template-columns:1fr 1fr; gap:4px; background:var(--idle-bg); border-radius:12px; padding:4px; margin-bottom:12px; }
   .seg2 button { border:0; border-radius:9px; padding:9px 6px; font:inherit; font-weight:600; background:transparent; color:var(--muted); }
   .seg2 button[aria-pressed="true"] { background:var(--card); color:var(--ink); box-shadow:0 1px 3px rgba(0,0,0,.12); }
@@ -368,6 +371,7 @@ function viewQuestion(i, old) {
   if (!open[key]) return h + (old
     ? `<div class="btns"><button class="secondary" data-act="drop" data-key="${esc(key)}">Drop it</button><button class="primary" data-act="toggle" data-key="${esc(key)}">Read and decide</button></div></div>`
     : `<div class="btns" style="grid-template-columns:1fr"><button class="secondary" data-act="toggle" data-key="${esc(key)}">Read and decide</button></div></div>`);
+  h = h.replace('<div class="card">', '<div class="card opened">') + xBtn(key);
   h += cardHtml(c, ['What it does', 'Why it matters', 'Status']);
   const q = qcache[key];
   h += `<div class="q">${q ? esc(q.text) : 'Loading the latest comment…'}</div>`;
@@ -383,6 +387,7 @@ function viewQuestion(i, old) {
   h += `<p class="meta"><a href="${esc(i.html_url)}" target="_blank" rel="noopener">Open on GitHub</a></p>`;
   return h + '</div>';
 }
+function xBtn(key) { return `<button class="x" data-act="toggle" data-key="${esc(key)}" aria-label="Close" title="Close">✕</button>`; }
 function viewRead(i) {
   const key = i.repoKey + '#' + i.number; const c = card(i.body); const lane = laneOf(i.labels);
   const digest = /Digest/.test(i.title);
@@ -391,11 +396,13 @@ function viewRead(i) {
   if (!open[key]) {
     return h + `<div class="btns"><button class="secondary" data-act="toggle" data-key="${esc(key)}">Read more</button><button class="primary" data-act="gotit" data-key="${esc(key)}">Got it</button></div></div>`;
   }
+  h = h.replace('<div class="card">', '<div class="card opened">') + xBtn(key);
   h += cardHtml(c, ['What it does', 'Why it matters']);
   const q = qcache[key];
   h += `<div class="q">${q ? esc(q.text) : 'Loading the latest comment…'}</div>`;
   h += `<div class="meta" style="margin-top:10px">Want something done about it? Write your decision and Lane R files the job for the right lane.</div><textarea id="ans-${esc(key)}" placeholder="${digest ? 'e.g. #430: retire the GPT-4 card' : 'Your decision'}"></textarea>`;
   h += `<div class="btns"><button class="secondary" data-act="decideread" data-key="${esc(key)}">Send decision</button><button class="primary" data-act="gotit" data-key="${esc(key)}">Got it</button></div>`;
+  h += `<div class="btns" style="grid-template-columns:1fr"><button class="secondary" data-act="toggle" data-key="${esc(key)}">Close</button></div>`;
   h += `<p class="meta"><a href="${esc(i.html_url)}" target="_blank" rel="noopener">Open on GitHub</a> · Got it closes it; nothing else changes.</p>`;
   return h + '</div>';
 }
@@ -542,6 +549,13 @@ async function postAnswer(key, text, release, btn) {
   } catch (e) { if (btn) btn.disabled = false; toast(e.message); }
 }
 
+// Every pop-up gets a ✕ in its corner, and a tap outside it closes it too.
+function addX(d) {
+  const b = document.createElement('button'); b.className = 'x'; b.type = 'button'; b.textContent = '✕';
+  b.setAttribute('aria-label', 'Close'); b.onclick = () => d.close(); d.prepend(b);
+}
+document.getElementById('dlg').addEventListener('click', (e) => { if (e.target.id === 'dlg') e.target.close(); });
+
 // ---------- actions ----------
 document.addEventListener('click', async (ev) => {
   const t = ev.target.closest('[data-act], [data-tab]'); if (!t) return;
@@ -633,7 +647,7 @@ document.addEventListener('click', async (ev) => {
       ${isAccessPr(p) ? '<div class="warn">This changes sign-in. Merge only after reading it.</div>' : ''}
       ${dcm ? '<label class="check"><input type="checkbox" id="nopress"> No New AI Ideas press is running right now.</label>' : ''}
       <div class="btns"><button class="secondary" id="dNo">Cancel</button><button class="primary" id="dYes" ${dcm ? 'disabled' : ''}>Yes, merge</button></div>`;
-    d.showModal();
+    addX(d); d.showModal();
     if (dcm) $('#nopress').addEventListener('change', (e) => ($('#dYes').disabled = !e.target.checked));
     $('#dNo').onclick = () => d.close();
     $('#dYes').onclick = () => { d.close(); sendRequest(`merge ${key}${dcm ? ' no-press-confirmed' : ''}`, 'merge ' + key); };
@@ -646,7 +660,7 @@ document.addEventListener('click', async (ev) => {
       <div class="q">${list.map((p) => `#${p.number} ${esc(p.title)}`).join('<br>')}</div>
       ${dcm ? '<label class="check"><input type="checkbox" id="nopress"> No New AI Ideas press is running right now.</label><p class="meta">The live app restarts after each DCM merge. If the queue runs past an hour, the PC pauses and asks you again.</p>' : ''}
       <div class="btns"><button class="secondary" id="dNo">Cancel</button><button class="primary" id="dYes" ${dcm ? 'disabled' : ''}>Queue them</button></div>`;
-    d.showModal();
+    addX(d); d.showModal();
     if (dcm) $('#nopress').addEventListener('change', (e) => ($('#dYes').disabled = !e.target.checked));
     $('#dNo').onclick = () => d.close();
     $('#dYes').onclick = () => { d.close(); sendRequest(`merge-all ${rk}${dcm ? ' no-press-confirmed' : ''}`, 'merge-all ' + rk); };
@@ -655,7 +669,7 @@ document.addEventListener('click', async (ev) => {
     d.innerHTML = `<h3 style="margin-top:0">Resume DCM merges?</h3><p class="meta">Each DCM merge restarts the live app, which cuts off a running press.</p>
       <label class="check"><input type="checkbox" id="nopress"> No New AI Ideas press is running right now.</label>
       <div class="btns"><button class="secondary" id="dNo">Cancel</button><button class="primary" id="dYes" disabled>Resume</button></div>`;
-    d.showModal();
+    addX(d); d.showModal();
     $('#nopress').addEventListener('change', (e) => ($('#dYes').disabled = !e.target.checked));
     $('#dNo').onclick = () => d.close();
     $('#dYes').onclick = () => { d.close(); sendRequest('merge-queue resume no-press-confirmed', 'queue resume'); };
