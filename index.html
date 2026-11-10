@@ -73,6 +73,9 @@
   .gauge { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--line); display: flex; align-items: flex-end; justify-content: space-between; gap: 8px; }
   .gauge.empty { display: block; }
   .gtext { text-align: right; } .gpct { font-size: 30px; font-weight: 700; line-height: 1.1; }
+  .seg2 { display:grid; grid-template-columns:1fr 1fr; gap:4px; background:var(--idle-bg); border-radius:12px; padding:4px; margin-bottom:12px; }
+  .seg2 button { border:0; border-radius:9px; padding:9px 6px; font:inherit; font-weight:600; background:transparent; color:var(--muted); }
+  .seg2 button[aria-pressed="true"] { background:var(--card); color:var(--ink); box-shadow:0 1px 3px rgba(0,0,0,.12); }
 </style>
 </head>
 <body>
@@ -101,7 +104,9 @@ const KEY = 'dcmRemoteToken';
 let token = null;
 try { token = localStorage.getItem(KEY); } catch (e) { token = null; }
 let tab = 'status';
-const data = { status: null, waiting: [], prs: [], inprog: [], attended: [], today: { prs: [], closed: [] }, requests: [], loadedAt: 0, error: '' };
+let decideSub = 'decide';   // Decide tab: 'decide' (questions) or 'read' (finished research to read)
+const OLD_DAYS = 7;         // a question with no movement for this long goes in "Old"
+const data = { status: null, waiting: [], reading: [], prs: [], inprog: [], attended: [], today: { prs: [], closed: [] }, requests: [], loadedAt: 0, error: '' };
 const qcache = {};       // latest comment, choices and recommendation per question
 const open = {};          // expanded items
 const pending = {};       // request id -> label, until a result arrives
@@ -174,13 +179,17 @@ async function loadAll() {
     data.today.prs = [...a1.map((p) => ({ ...p, repoKey: 'dcm' })), ...a2.map((p) => ({ ...p, repoKey: 'market' }))]
       .filter((p) => isToday(p.created_at) || isToday(p.merged_at));
     data.today.closed = [...c1.map((i) => ({ ...i, repoKey: 'dcm' })), ...c2.map((i) => ({ ...i, repoKey: 'market' }))]
-      .filter((i) => !i.pull_request && isToday(i.closed_at));
+      .filter((i) => !i.pull_request && isToday(i.closed_at) && !(i.labels || []).some((l) => ['intel', 'for-reading'].includes(l.name)));
     const m = (issue.body || '').match(/<!-- dcm-remote-json (\{.*?\}) -->/);
     data.status = m ? JSON.parse(m[1]) : null;
     const allOpen = [...w1, ...w2];
     const has = (i, n) => (i.labels || []).some((l) => l.name === n);
     data.open = allOpen;
     data.waiting = allOpen.filter((i) => has(i, 'needs-anthony')).sort((a, b) => a.number - b.number);
+    // Finished research and Tool Watch digests (ruling 2026-11-10): read, then "Got it" or decide.
+    const pr = (i) => (has(i, 'p1') ? 1 : has(i, 'p2') ? 2 : has(i, 'p3') ? 3 : 4);
+    data.reading = allOpen.filter((i) => has(i, 'for-reading') && !has(i, 'needs-anthony'))
+      .sort((a, b) => (/Digest/.test(b.title) - /Digest/.test(a.title)) || pr(a) - pr(b) || a.number - b.number);
     data.prs = [...p1.map((p) => ({ ...p, repoKey: 'dcm' })), ...p2.map((p) => ({ ...p, repoKey: 'market' }))];
     data.inprog = allOpen.filter((i) => has(i, 'in-progress'));
     data.attended = allOpen.filter((i) => i.repoKey === 'dcm' && has(i, 'attended-waiting'));
@@ -301,8 +310,10 @@ function blockers() {
     }
   }
   const qs = data.waiting.filter((i) => !data.attended.some((a) => a.number === i.number));
-  for (const i of qs) if (laneOf(i.labels)) out.push({ kind: 'q', i });
-  for (const i of qs) if (!laneOf(i.labels)) out.push({ kind: 'q', i, other: true });
+  const isOld = (i) => Date.now() - new Date(i.updated_at) > OLD_DAYS * 864e5;
+  for (const i of qs) if (isOld(i)) out.push({ kind: 'old', i });
+  for (const i of qs) if (!isOld(i) && laneOf(i.labels)) out.push({ kind: 'q', i });
+  for (const i of qs) if (!isOld(i) && !laneOf(i.labels)) out.push({ kind: 'q', i, other: true });
   return out;
 }
 const LOCKTEXT = {
@@ -350,11 +361,13 @@ function parseChoices(text) {
   const ids = best.map((c) => c.id).join('');
   return ('123456'.startsWith(ids) || 'abcdef'.startsWith(ids)) ? best.slice(0, 6) : [];
 }
-function viewQuestion(i) {
+function viewQuestion(i, old) {
   const key = i.repoKey + '#' + i.number; const c = card(i.body); const lane = laneOf(i.labels);
   let h = `<div class="card"><div class="meta">${i.repoKey === 'market' ? 'Market' : 'DCM'} #${i.number}${lane ? ' · Lane ' + lane : ''} · updated ${ago(i.updated_at)}</div><h3>${esc(i.title)}</h3>`;
   h += cardHtml(c, ['Needs you']);
-  if (!open[key]) return h + `<div class="btns" style="grid-template-columns:1fr"><button class="secondary" data-act="toggle" data-key="${esc(key)}">Read and decide</button></div></div>`;
+  if (!open[key]) return h + (old
+    ? `<div class="btns"><button class="secondary" data-act="drop" data-key="${esc(key)}">Drop it</button><button class="primary" data-act="toggle" data-key="${esc(key)}">Read and decide</button></div></div>`
+    : `<div class="btns" style="grid-template-columns:1fr"><button class="secondary" data-act="toggle" data-key="${esc(key)}">Read and decide</button></div></div>`);
   h += cardHtml(c, ['What it does', 'Why it matters', 'Status']);
   const q = qcache[key];
   h += `<div class="q">${q ? esc(q.text) : 'Loading the latest comment…'}</div>`;
@@ -370,16 +383,37 @@ function viewQuestion(i) {
   h += `<p class="meta"><a href="${esc(i.html_url)}" target="_blank" rel="noopener">Open on GitHub</a></p>`;
   return h + '</div>';
 }
+function viewRead(i) {
+  const key = i.repoKey + '#' + i.number; const c = card(i.body); const lane = laneOf(i.labels);
+  const digest = /Digest/.test(i.title);
+  let h = `<div class="card"><div class="meta">${digest ? 'Tool Watch digest' : 'Research'} · #${i.number}${lane ? ' · Lane ' + lane : ''} · ${ago(i.updated_at)}</div><h3>${esc(i.title.replace(/^\[Tool Watch\]\s*/, ''))}</h3>`;
+  h += cardHtml(c, ['Status', 'Needs you']);
+  if (!open[key]) {
+    return h + `<div class="btns"><button class="secondary" data-act="toggle" data-key="${esc(key)}">Read more</button><button class="primary" data-act="gotit" data-key="${esc(key)}">Got it</button></div></div>`;
+  }
+  h += cardHtml(c, ['What it does', 'Why it matters']);
+  const q = qcache[key];
+  h += `<div class="q">${q ? esc(q.text) : 'Loading the latest comment…'}</div>`;
+  h += `<div class="meta" style="margin-top:10px">Want something done about it? Write your decision and Lane R files the job for the right lane.</div><textarea id="ans-${esc(key)}" placeholder="${digest ? 'e.g. #430: retire the GPT-4 card' : 'Your decision'}"></textarea>`;
+  h += `<div class="btns"><button class="secondary" data-act="decideread" data-key="${esc(key)}">Send decision</button><button class="primary" data-act="gotit" data-key="${esc(key)}">Got it</button></div>`;
+  h += `<p class="meta"><a href="${esc(i.html_url)}" target="_blank" rel="noopener">Open on GitHub</a> · Got it closes it; nothing else changes.</p>`;
+  return h + '</div>';
+}
 function viewDecide() {
-  const all = blockers();
-  if (!all.length) return '<div class="empty">Nothing is waiting on you. No lane is blocked.</div>';
+  const all = blockers(); const nr = data.reading.length;
+  let h = `<div class="seg2"><button data-act="sub" data-key="decide" aria-pressed="${decideSub === 'decide'}">Decide (${all.length})</button><button data-act="sub" data-key="read" aria-pressed="${decideSub === 'read'}">To read (${nr})</button></div>`;
+  if (decideSub === 'read') {
+    if (!nr) return h + '<div class="empty">Nothing to read.</div>';
+    return h + '<p class="meta">Finished research and the weekly Tool Watch. Nothing here holds up a lane.</p>' + data.reading.map(viewRead).join('');
+  }
+  if (!all.length) return h + '<div class="empty">Nothing is waiting on you. No lane is blocked.</div>';
   const sec = (title, items, fn) => (items.length ? `<h2>${title}</h2>` + items.map(fn).join('') : '');
-  let h = '';
   h += sec('Locks in the way', all.filter((b) => b.kind === 'lock'), (b) => viewLock(b.l));
   h += sec('Lane X needs your go', all.filter((b) => b.kind === 'go'), (b) => viewGo(b.i));
   h += sec('Stuck jobs', all.filter((b) => b.kind === 'stuck'), viewStuck);
   h += sec('Questions holding up a lane', all.filter((b) => b.kind === 'q' && !b.other), (b) => viewQuestion(b.i));
   h += sec('Other questions for you', all.filter((b) => b.kind === 'q' && b.other), (b) => viewQuestion(b.i));
+  h += sec(`Old: no movement for over ${OLD_DAYS} days`, all.filter((b) => b.kind === 'old'), (b) => viewQuestion(b.i, true));
   if (data.status && !data.status.locks) h += '<p class="meta">Lock checks appear once the PC runs the updated watcher (reopen the DCM Hub).</p>';
   return h;
 }
@@ -485,7 +519,7 @@ async function loadQuestion(key) {
   try {
     const cs = await api(`repos/${CFG.repos[rk]}/issues/${n}/comments?per_page=100`);
     const last = cs.length ? cs[cs.length - 1] : null;
-    const issue = data.waiting.find((i) => i.repoKey + '#' + i.number === key);
+    const issue = [...data.waiting, ...data.reading].find((i) => i.repoKey + '#' + i.number === key);
     const text = last ? last.body : (issue ? issue.body : '');
     qcache[key] = {
       text: last ? `Latest comment (${ago(last.created_at)}):\n\n${last.body.replace(/\*\*/g, '')}` : 'No comments yet. The question is in the card above; open it on GitHub for the full text.',
@@ -526,6 +560,35 @@ document.addEventListener('click', async (ev) => {
     if (!confirm('Remove the GitHub key from this phone?')) return;
     try { localStorage.removeItem(KEY); } catch (e) {}
     token = null; render();
+  } else if (act === 'sub') {
+    decideSub = key; render(); window.scrollTo(0, 0);
+  } else if (act === 'gotit' || act === 'drop' || act === 'decideread') {
+    const [rk, n] = key.split('#'); const repo = CFG.repos[rk];
+    let text = '';
+    if (act === 'decideread') {
+      text = (document.getElementById('ans-' + key).value || '').trim();
+      if (!text) return toast('Write your decision first.');
+      if (!confirm('Send this decision? Lane R files the work for it next time it runs.')) return;
+    } else if (act === 'drop' && !confirm('Drop #' + n + '? It is closed as "not planned". You can reopen it on GitHub.')) return;
+    t.disabled = true;
+    try {
+      if (act === 'gotit') {
+        await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: 'Read. Got it.\n\n— Anthony (DCM Remote)' } });
+        await api(`repos/${repo}/issues/${n}`, { method: 'PATCH', body: { state: 'closed', state_reason: 'completed' } });
+        toast('Closed. Thanks.');
+      } else if (act === 'drop') {
+        await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: 'Dropped: no longer needed.\n\n— Anthony (DCM Remote)' } });
+        await api(`repos/${repo}/issues/${n}`, { method: 'PATCH', body: { state: 'closed', state_reason: 'not_planned' } });
+        toast('Dropped.');
+      } else {
+        await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: 'Decision: ' + text.replace(/^decision:\s*/i, '') + '\n\n— Anthony (DCM Remote)' } });
+        await api(`repos/${repo}/issues/${n}/labels`, { method: 'POST', body: { labels: ['decided'] } });
+        try { await api(`repos/${repo}/issues/${n}/labels/for-reading`, { method: 'DELETE' }); } catch (e) {}
+        toast('Decision sent. Lane R files the work next time it runs.');
+      }
+      open[key] = false; delete qcache[key];
+      await loadAll();
+    } catch (e) { t.disabled = false; toast(e.message); }
   } else if (act === 'toggle') {
     open[key] = !open[key]; render();
   } else if (act === 'answer') {
