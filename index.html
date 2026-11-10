@@ -188,23 +188,26 @@ async function loadAll() {
     const results = {};
     for (const c of comments) {
       const r = (c.body || '').match(/^dcm-remote-result for (\d+): (\w+)/);
-      if (r) results[r[1]] = { verdict: r[2], text: c.body.split('\n').slice(1).join('\n').trim(), at: c.created_at };
+      if (r) (results[r[1]] = results[r[1]] || []).push({ verdict: r[2], text: c.body.split('\n').slice(1).join('\n').trim(), at: c.created_at });
     }
     data.requests = comments.filter((c) => /^dcm-remote:/.test(c.body || '') && c.user.login === CFG.owner)
-      .map((c) => ({ id: String(c.id), cmd: c.body.split('\n')[0].replace(/^dcm-remote:\s*/, ''), at: c.created_at, result: results[String(c.id)] || null }))
+      .map((c) => { const all = results[String(c.id)] || []; return { id: String(c.id), cmd: c.body.split('\n')[0].replace(/^dcm-remote:\s*/, ''), at: c.created_at, results: all, result: all.length ? all[all.length - 1] : null }; })
       .reverse();
-    for (const r of data.requests) if (r.result && pending[r.id] && !['started'].includes(r.result.verdict)) delete pending[r.id];
+    for (const r of data.requests) if (r.result && pending[r.id] && r.result.verdict !== 'started') delete pending[r.id];   // once queued, the queue card shows it
     data.loadedAt = Date.now();
   } catch (e) { data.error = e.message || String(e); }
   render();
 }
 
+// A request with one of these verdicts is still in progress: more results follow.
+const OPEN_VERDICTS = ['started', 'queued', 'waiting'];
+function verdictCls(v) { return ['done', 'merged'].includes(v) ? 'ok' : OPEN_VERDICTS.includes(v) ? 'wait' : 'bad'; }
 async function sendRequest(cmd, label) {
   try {
     const c = await api(`repos/${CFG.repos.dcm}/issues/${CFG.requestIssue}/comments`, { method: 'POST', body: { body: 'dcm-remote: ' + cmd + '\n\nSent from DCM Remote.' } });
     pending[String(c.id)] = label;
     toast('Sent. The PC picks it up within a minute.');
-    if (tab !== 'decide') tab = 'lanes';
+    if (tab !== 'decide' && tab !== 'merges') tab = 'lanes';
     await loadAll();
   } catch (e) { toast(e.message); }
 }
@@ -244,6 +247,7 @@ function viewStatus() {
   let h = `<div class="card"><div class="row"><b>Your PC</b><span class="chip ${pc.cls}">${esc(pc.text)}</span></div>`;
   if (pc.cls !== 'ok') h += '<p class="meta">Requests from the phone wait until the PC is on with the DCM Hub open. Lane status below is from the last report.</p>';
   if (s && s.merge) h += `<p class="meta">Checked merge in progress: ${esc(s.merge)}</p>`;
+  if (s && s.queue && s.queue.length) h += `<p class="meta">Merge queue${s.queuePaused ? ' (paused: confirm no press on Merges)' : ''}: ${esc(s.queue.join(', '))}</p>`;
   if (s && s.gate) h += '<p class="meta">A full test run (gate) is in progress.</p>';
   const nb = blockers().length;
   if (nb) h += `<div class="btns" style="grid-template-columns:1fr"><button class="primary" data-tab="decide">${nb} thing${nb > 1 ? 's' : ''} waiting on your decision</button></div>`;
@@ -380,16 +384,45 @@ function viewDecide() {
   return h;
 }
 function isAccessPr(p) { return /^lane\/x/.test(p.head.ref) || (p.labels || []).some((l) => l.name === 'access'); }
+// Mirrors the PC's "ready" rule for merge-all (remote-watcher.ps1, Add-AllReady).
+const HOLD_LABELS = ['hold', 'needs-anthony', 'attended-waiting'];
+function isReadyPr(p) { return !p.draft && !isAccessPr(p) && !(p.labels || []).some((l) => HOLD_LABELS.includes(l.name) || l.name === 'lane-x'); }
+function readyList(rk) {
+  const q = (data.status && data.status.queue) || []; const run = runningTag();
+  return data.prs.filter((p) => p.repoKey === rk && isReadyPr(p) && !q.includes(rk + '#' + p.number) && run !== rk + '#' + p.number);
+}
+function runningTag() { const m = ((data.status && data.status.merge) || '').match(/^(\w+#\d+)/); return m ? m[1] : null; }
+function viewQueue() {
+  const s = data.status || {}; const q = s.queue || []; const run = runningTag();
+  const ready = (rk) => readyList(rk).length;
+  const sentAll = (rk) => Object.values(pending).includes('merge-all ' + rk);
+  let h = '<div class="card"><h3>Merge queue</h3><p class="meta">Your PC merges one PR at a time, oldest first. Each one is checked before it merges.</p>';
+  if (s.v && s.v < 3) h += '<p class="meta">The queue appears once the PC runs the updated watcher.</p>';
+  h += `<p style="margin:8px 0 4px"><b>Now:</b> ${run ? esc(s.merge) : 'nothing merging'}</p>`;
+  if (q.length) h += `<p style="margin:4px 0"><b>Waiting (${q.length}):</b> ${esc(q.join(', '))}</p>`;
+  if (s.queuePaused) h += '<div class="warn">Paused: DCM merges restart the live app, and your no-press answer is over an hour old. Check that no New AI Ideas press is running, then resume.</div>';
+  h += '<div class="btns">';
+  const nd = ready('dcm'), nm = ready('market');
+  h += `<button class="primary" data-act="mergeall" data-key="dcm" ${!nd || sentAll('dcm') ? 'disabled' : ''}>${sentAll('dcm') ? 'Sent…' : `Merge all ready DCM (${nd})`}</button>`;
+  h += `<button class="primary" data-act="mergeall" data-key="market" ${!nm || sentAll('market') ? 'disabled' : ''}>${sentAll('market') ? 'Sent…' : `Merge all ready Market (${nm})`}</button>`;
+  if (s.queuePaused) h += '<button class="primary" data-act="qresume">Resume merges</button>';
+  if (q.length) h += '<button class="secondary" data-act="qclear">Empty the queue</button>';
+  h += '</div><p class="meta" style="margin-top:6px">"Ready" leaves out drafts, PRs on hold or waiting for you, and Lane X (sign-in) PRs, which always need their own yes.</p></div>';
+  return h;
+}
 function viewMerges() {
-  if (!data.prs.length) return '<div class="empty">No pull requests are open.</div>';
-  return data.prs.map((p) => {
+  if (!data.prs.length) return viewQueue() + '<div class="empty">No pull requests are open.</div>';
+  const q = (data.status && data.status.queue) || []; const run = runningTag();
+  return viewQueue() + data.prs.map((p) => {
     const c = card(p.body); const key = p.repoKey + '#' + p.number;
-    const busy = Object.values(pending).some((v) => v === 'merge ' + key);
+    const qi = q.indexOf(key);
+    const busy = qi >= 0 || run === key || Object.values(pending).some((v) => v === 'merge ' + key);
+    const btn = run === key ? 'Merging now…' : qi >= 0 ? `In queue (${qi + 1} of ${q.length})` : busy ? 'Sent…' : 'Yes, merge';
     let h = `<div class="card"><div class="meta">${p.repoKey === 'market' ? 'Market' : 'DCM'} PR #${p.number} · ${esc(p.head.ref)} · opened ${ago(p.created_at)}</div><h3>${esc(p.title)}</h3>`;
     h += cardHtml(c, ['What it does', 'Status', 'Needs you']);
     if (isAccessPr(p)) h += '<div class="warn">Changes sign-in (Lane X). Say yes only to this one PR, after reading it.</div>';
     if (p.draft) h += '<p class="meta">Draft: not ready to merge.</p>';
-    h += `<div class="btns"><a class="secondary" style="display:flex;align-items:center;justify-content:center;border-radius:10px;background:var(--idle-bg);color:var(--ink);text-decoration:none;font-weight:600" href="${esc(p.html_url)}" target="_blank" rel="noopener">Read on GitHub</a><button class="primary" data-act="merge" data-key="${esc(key)}" ${p.draft || busy ? 'disabled' : ''}>${busy ? 'Sent…' : 'Yes, merge'}</button></div>`;
+    h += `<div class="btns"><a class="secondary" style="display:flex;align-items:center;justify-content:center;border-radius:10px;background:var(--idle-bg);color:var(--ink);text-decoration:none;font-weight:600" href="${esc(p.html_url)}" target="_blank" rel="noopener">Read on GitHub</a><button class="primary" data-act="merge" data-key="${esc(key)}" ${p.draft || busy ? 'disabled' : ''}>${btn}</button></div>`;
     return h + '</div>';
   }).join('');
 }
@@ -404,9 +437,13 @@ function viewLanes() {
   if (!data.requests.length) h += '<div class="empty">No requests in the last 4 days.</div>';
   for (const r of data.requests.slice(0, 15)) {
     const v = r.result ? r.result.verdict : 'waiting for the PC';
-    const cls = !r.result || v === 'started' ? (r.result ? 'ok' : 'wait') : ['done', 'merged'].includes(v) ? 'ok' : 'bad';
+    const cls = r.result ? verdictCls(v) : 'wait';
     h += `<div class="card"><div class="row"><b>${esc(r.cmd.replace(/ no-press-confirmed$/, ''))}</b><span class="chip ${cls}">${esc(v)}</span></div><div class="meta">${ago(r.at)}</div>`;
-    if (r.result && r.result.text) h += `<div class="q">${esc(r.result.text.replace(/^- /gm, '• '))}</div>`;
+    // Every reply the PC posted for this request, oldest first (merge-all posts one per PR).
+    for (const x of r.results) {
+      if (!x.text) continue;
+      h += `<div class="q">${r.results.length > 1 ? `<span class="chip ${verdictCls(x.verdict)}" style="font-size:12px">${esc(x.verdict)}</span> ` : ''}${esc(x.text.replace(/^- /gm, '• '))}</div>`;
+    }
     h += '</div>';
   }
   h += '<h2>This phone</h2><div class="card"><p class="meta">Your GitHub key is stored only on this phone.</p><button class="secondary" data-act="forget">Change key</button></div>';
@@ -537,6 +574,31 @@ document.addEventListener('click', async (ev) => {
     if (dcm) $('#nopress').addEventListener('change', (e) => ($('#dYes').disabled = !e.target.checked));
     $('#dNo').onclick = () => d.close();
     $('#dYes').onclick = () => { d.close(); sendRequest(`merge ${key}${dcm ? ' no-press-confirmed' : ''}`, 'merge ' + key); };
+  } else if (act === 'mergeall') {
+    const rk = key; const dcm = rk === 'dcm';
+    const list = readyList(rk);
+    const d = $('#dlg');
+    d.innerHTML = `<h3 style="margin-top:0">Merge all ready ${dcm ? 'DCM' : 'Market'} PRs?</h3>
+      <p class="meta">${list.length} PR${list.length === 1 ? '' : 's'} go into the queue and merge one at a time. Each is checked first; a PR that fails or conflicts is skipped and the rest carry on.</p>
+      <div class="q">${list.map((p) => `#${p.number} ${esc(p.title)}`).join('<br>')}</div>
+      ${dcm ? '<label class="check"><input type="checkbox" id="nopress"> No New AI Ideas press is running right now.</label><p class="meta">The live app restarts after each DCM merge. If the queue runs past an hour, the PC pauses and asks you again.</p>' : ''}
+      <div class="btns"><button class="secondary" id="dNo">Cancel</button><button class="primary" id="dYes" ${dcm ? 'disabled' : ''}>Queue them</button></div>`;
+    d.showModal();
+    if (dcm) $('#nopress').addEventListener('change', (e) => ($('#dYes').disabled = !e.target.checked));
+    $('#dNo').onclick = () => d.close();
+    $('#dYes').onclick = () => { d.close(); sendRequest(`merge-all ${rk}${dcm ? ' no-press-confirmed' : ''}`, 'merge-all ' + rk); };
+  } else if (act === 'qresume') {
+    const d = $('#dlg');
+    d.innerHTML = `<h3 style="margin-top:0">Resume DCM merges?</h3><p class="meta">Each DCM merge restarts the live app, which cuts off a running press.</p>
+      <label class="check"><input type="checkbox" id="nopress"> No New AI Ideas press is running right now.</label>
+      <div class="btns"><button class="secondary" id="dNo">Cancel</button><button class="primary" id="dYes" disabled>Resume</button></div>`;
+    d.showModal();
+    $('#nopress').addEventListener('change', (e) => ($('#dYes').disabled = !e.target.checked));
+    $('#dNo').onclick = () => d.close();
+    $('#dYes').onclick = () => { d.close(); sendRequest('merge-queue resume no-press-confirmed', 'queue resume'); };
+  } else if (act === 'qclear') {
+    if (!confirm('Take every waiting PR out of the merge queue? Nothing is merged; the one merging now finishes.')) return;
+    sendRequest('merge-queue clear', 'queue clear');
   } else if (act === 'start') {
     const lane = t.dataset.lane;
     sendRequest(lane === 'all' ? 'start all' : 'start ' + lane.toLowerCase(), 'start ' + lane);
