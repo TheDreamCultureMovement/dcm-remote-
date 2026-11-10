@@ -79,13 +79,22 @@
   .seg2 { display:grid; grid-template-columns:1fr 1fr; gap:4px; background:var(--idle-bg); border-radius:12px; padding:4px; margin-bottom:12px; }
   .seg2 button { border:0; border-radius:9px; padding:9px 6px; font:inherit; font-weight:600; background:transparent; color:var(--muted); }
   .seg2 button[aria-pressed="true"] { background:var(--card); color:var(--ink); box-shadow:0 1px 3px rgba(0,0,0,.12); }
+  .hright { display:flex; align-items:center; gap:10px; }
+  .quit { border:0; border-radius:999px; padding:6px 12px; font:inherit; font-size:14px; font-weight:600; background:var(--idle-bg); color:var(--ink); }
+  #closed { position:fixed; inset:0; z-index:50; background:var(--bg); display:flex; align-items:center; justify-content:center; padding:24px 16px; }
+  #closed.hide { display:none; }
+  .closedbox { max-width:360px; width:100%; background:var(--card); border:1px solid var(--line); border-radius:14px; padding:20px; }
 </style>
 </head>
 <body>
 <header>
   <h1>DCM Remote</h1>
-  <div class="pc" id="pc">…</div>
+  <div class="hright"><div class="pc" id="pc">…</div><button class="quit" id="quit" type="button" aria-label="Close the app">Close</button></div>
 </header>
+<div id="closed" class="hide"><div class="closedbox"><h3 style="margin-top:0;font-size:20px">DCM Remote is closed</h3>
+  <p>It has stopped checking GitHub, so it uses no data or battery.</p>
+  <p class="meta">To leave the screen, swipe up from the bottom edge. (iPhone does not let an app close itself.)</p>
+  <button class="primary" id="reopen" type="button">Open again</button></div></div>
 <main id="main"></main>
 <nav id="nav" class="hide">
   <button data-tab="status" aria-selected="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Status</button>
@@ -684,8 +693,17 @@ document.addEventListener('click', async (ev) => {
 
 render();
 if (token) loadAll();
-(function tick() { setTimeout(async () => { if (token && document.visibilityState === 'visible') await loadAll(); tick(); }, Object.keys(pending).length ? 15000 : 45000); })();
-document.addEventListener('visibilitychange', () => { if (token && document.visibilityState === 'visible') loadAll(); });
+// "Close": iPhone does not let a home-screen app close itself, so this stops all checking and
+// covers the screen; the person swipes up to leave. Opening the app again starts it fresh.
+let closedApp = false;
+$('#quit').onclick = () => {
+  closedApp = true; try { $('#dlg').close(); } catch (e) {}
+  $('#closed').classList.remove('hide');
+  try { window.close(); } catch (e) {}
+};
+$('#reopen').onclick = () => { closedApp = false; $('#closed').classList.add('hide'); if (token) loadAll(); };
+(function tick() { setTimeout(async () => { if (token && !closedApp && document.visibilityState === 'visible') await loadAll(); tick(); }, Object.keys(pending).length ? 15000 : 45000); })();
+document.addEventListener('visibilitychange', () => { if (token && !closedApp && document.visibilityState === 'visible') loadAll(); });
 </script>
 </body>
 </html>
