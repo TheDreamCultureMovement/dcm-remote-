@@ -86,6 +86,9 @@
   .rvbar { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:10px 0; }
   .big { min-height:52px; font-size:17px; }
   .rvans { margin-top:8px; padding:10px 12px; border-radius:10px; background:var(--wait-bg); color:var(--ink); white-space:pre-wrap; font-size:15px; }
+  .lchips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .lchip { border:1px solid var(--line); border-radius:999px; padding:7px 13px; font:inherit; font-weight:600; background:var(--card); color:var(--ink); min-width:44px; }
+  .lchip[aria-pressed="true"] { background:var(--accent); border-color:transparent; color:var(--accent-ink); }
   .hright { display:flex; align-items:center; gap:10px; }
   .quit { border:0; border-radius:999px; padding:6px 12px; font:inherit; font-size:14px; font-weight:600; background:var(--idle-bg); color:var(--ink); }
   #closed { position:fixed; inset:0; z-index:50; background:var(--bg); display:flex; align-items:center; justify-content:center; padding:24px 16px; }
@@ -231,9 +234,9 @@ async function loadAll() {
 // A request with one of these verdicts is still in progress: more results follow.
 const OPEN_VERDICTS = ['started', 'queued', 'waiting'];
 function verdictCls(v) { return ['done', 'merged'].includes(v) ? 'ok' : OPEN_VERDICTS.includes(v) ? 'wait' : 'bad'; }
-async function sendRequest(cmd, label) {
+async function sendRequest(cmd, label, extra) {
   try {
-    const c = await api(`repos/${CFG.repos.dcm}/issues/${CFG.requestIssue}/comments`, { method: 'POST', body: { body: 'dcm-remote: ' + cmd + '\n\nSent from DCM Remote.' } });
+    const c = await api(`repos/${CFG.repos.dcm}/issues/${CFG.requestIssue}/comments`, { method: 'POST', body: { body: 'dcm-remote: ' + cmd + (extra ? '\n' + extra : '') + '\n\nSent from DCM Remote.' } });
     pending[String(c.id)] = label;
     toast('Sent. The PC picks it up within a minute.');
     if (tab !== 'decide' && tab !== 'merges') tab = 'lanes';
@@ -280,6 +283,7 @@ function viewStatus() {
   if (s && s.gate) h += '<p class="meta">A full test run (gate) is in progress.</p>';
   const nb = blockers().length;
   if (nb) h += `<div class="btns" style="grid-template-columns:1fr"><button class="primary" data-tab="decide">${nb} thing${nb > 1 ? 's' : ''} waiting on your decision</button></div>`;
+  for (const f of (s && s.focus) || []) h += `<p class="meta" style="margin-top:6px">🎙 <b>Focus · ${esc(focusLabel(f.lanes))}${f.pause ? ', others paused' : ''}:</b> ${esc(f.text)}</p>`;
   h += '</div><h2>Lanes today</h2>';
   for (const k of ['A', 'B', 'C', 'D', 'R', 'M', 'X']) {
     const st = (s && s.lanes && s.lanes[k]) || 'unknown';
@@ -292,6 +296,7 @@ function viewStatus() {
     const done = prs.length + closed.length;
     h += `<div class="card"><div class="row"><div><b>Lane ${k}</b> <span class="meta">${esc(CFG.laneNames[k])}</span></div><span class="chip ${cls}">${esc(st)}</span></div>`;
     h += `<div class="meta" style="margin-top:4px">${done ? done + ' done today' : 'Nothing finished today'}${asks ? ` · ${asks} question${asks > 1 ? 's' : ''} for you` : ''}${rep ? ' · report written ' + esc(rep) : ''}</div>`;
+    if (focusFor(k).length) h += `<div class="meta" style="margin-top:4px">🎙 Focus: ${esc(focusFor(k).map((f) => f.text).join(' · ').slice(0, 160))}</div>`;
     if (now.length) h += '<div style="margin-top:8px;font-size:14px"><b>Working on</b>' + now.map((i) => `<div>#${i.number} ${esc(i.title)}</div>`).join('') + '</div>';
     const key = 'lane-' + k;
     if (done && open[key]) {
@@ -486,10 +491,53 @@ function viewMerges() {
     return h + '</div>';
   }).join('');
 }
+// ---------- telling the lanes what to focus on ----------
+const LANE_KEYS = ['A', 'B', 'C', 'D', 'R', 'M', 'X'];
+const MODULE_LANE = { 1: 'A', 2: 'B', 3: 'B', 4: 'C', 5: 'C', 7: 'D', 8: 'C' };   // Module 6 is paused
+const focusUi = { pick: new Set(), touched: false, pause: false, today: false };
+// Suggest lanes from what he said: "modules 1 and 2" -> A, B; "affiliate site" -> M; and so on.
+function guessLanes(text) {
+  const t = String(text || '').toLowerCase(); const out = new Set();
+  if (/\ball (the )?lanes\b|\bevery lane\b/.test(t)) return new Set(['all']);
+  for (const m of t.matchAll(/\b(?:modules?|m)\s*((?:\d\s*(?:,|and|&|\+|or)?\s*)+)/g)) for (const d of m[1].match(/\d/g) || []) if (MODULE_LANE[d]) out.add(MODULE_LANE[d]);
+  for (const m of t.matchAll(/\btabs?\s*(\d)\.\d/g)) if (MODULE_LANE[m[1]]) out.add(MODULE_LANE[m[1]]);
+  for (const m of t.matchAll(/\blane\s+([abcdrmx])\b/g)) out.add(m[1].toUpperCase());
+  if (/affiliate|market\b|marketplace|dreamculturemarket|the site|website|store/.test(t)) out.add('M');
+  if (/revenue|tax|money|income/.test(t)) out.add('D');
+  if (/research|tool watch/.test(t)) out.add('R');
+  if (/sign-?in|log-?in|access control/.test(t)) out.add('X');
+  return out;
+}
+function focusLabel(lanes) { return lanes === 'all' ? 'All lanes' : (lanes.includes(',') ? 'Lanes ' : 'Lane ') + lanes.toUpperCase().split(',').join(', '); }
+function focusFor(k) { return ((data.status && data.status.focus) || []).filter((f) => f.lanes === 'all' || f.lanes.toUpperCase().split(',').includes(k)); }
+function chipsHtml() {
+  const all = focusUi.pick.has('all');
+  return ['all', ...LANE_KEYS].map((k) => `<button type="button" class="lchip" data-act="fchip" data-key="${k}" aria-pressed="${all ? k === 'all' : focusUi.pick.has(k)}">${k === 'all' ? 'All' : k}</button>`).join('');
+}
+function viewFocus() {
+  const s = data.status || {}; const list = s.focus || [];
+  let h = '<div class="card"><h3>🎙 Tell the lanes</h3><p class="meta">Say or type what the lanes should put first. Tap the box, then the 🎤 on the keyboard to talk. For example: "Focus on Module 1 and 2 jobs and get them done first."</p>';
+  h += '<textarea id="focus-text" placeholder="Your instruction for the lanes"></textarea>';
+  h += `<div class="meta" style="margin-top:8px">Which lanes it is for${focusUi.touched ? '' : ' (picked from what you said; tap to change)'}</div><div class="lchips" id="fchips">${chipsHtml()}</div>`;
+  h += `<label class="check"><input type="checkbox" id="f-pause" ${focusUi.pause ? 'checked' : ''}> Pause the other lanes while this is on (the PC won't start them)</label>`;
+  h += `<label class="check"><input type="checkbox" id="f-today" ${focusUi.today ? 'checked' : ''}> Today only (ends at midnight)</label>`;
+  h += '<button class="primary" style="width:100%;margin-top:8px" data-act="focus-send">Send to the lanes</button>';
+  h += '<p class="meta" style="margin-top:6px">Each lane reads it before every job and takes the matching jobs first. It never overrides the lanes\' safety rules or hours.</p>';
+  if (s.v && s.v < 4) h += '<p class="meta">This needs the updated PC watcher (reopen the DCM Hub).</p>';
+  if (list.length) {
+    h += '<h3 style="margin-top:14px">Now in force</h3>';
+    for (const f of list) {
+      const busy = Object.values(pending).includes('focus-clear ' + f.id);
+      h += `<div class="q" style="margin-top:8px"><b>${esc(focusLabel(f.lanes))}</b>${f.pause ? ' · others paused' : ''}${f.until ? ' · today only' : ''}<div style="margin-top:4px">${esc(f.text)}</div>
+        <div class="btns" style="grid-template-columns:1fr"><button class="secondary" data-act="focus-clear" data-key="${esc(f.id)}" ${busy ? 'disabled' : ''}>${busy ? 'Removing…' : 'Remove'}</button></div></div>`;
+    }
+  }
+  return h + '</div>';
+}
 function viewLanes() {
   const s = data.status; const run = (k) => s && s.lanes && s.lanes[k] === 'running';
   const now = new Date(); const mins = now.getHours() * 60 + now.getMinutes();
-  let h = '<div class="card"><h3>Start lanes</h3><p class="meta">The PC keeps its rules: Lane C only from 6 pm to 7 am; Lanes M and D start last, after A, B, C and R have finished; Lane X starts no new job after 4:30 pm; nothing starts while Lane X runs.</p>';
+  let h = viewFocus() + '<div class="card"><h3>Start lanes</h3><p class="meta">The PC keeps its rules: Lane C only from 6 pm to 7 am; Lanes M and D start last, after A, B, C and R have finished; Lane X starts no new job after 4:30 pm; nothing starts while Lane X runs.</p>';
   h += '<button class="primary" style="margin-top:8px" data-act="start" data-lane="all">Start all lanes</button><div class="btns">';
   for (const k of ['A', 'B', 'C', 'D', 'R', 'M']) h += `<button class="secondary" data-act="start" data-lane="${k}" ${run(k) ? 'disabled' : ''}>Lane ${k}${run(k) ? ' (running)' : ''}</button>`;
   h += `<button class="secondary" data-act="start" data-lane="X" ${run('X') || mins >= 990 ? 'disabled' : ''}>Lane X${run('X') ? ' (running)' : mins >= 990 ? ' (after 4:30)' : ''}</button></div></div>`;
@@ -744,6 +792,14 @@ async function rvAction(act, t) {
   } catch (e) { t.disabled = false; toast(e.message); }
 }
 
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'focus-text' && !focusUi.touched) { focusUi.pick = guessLanes(e.target.value); const c = document.getElementById('fchips'); if (c) c.innerHTML = chipsHtml(); }
+});
+document.addEventListener('change', (e) => {
+  if (e.target.id === 'f-pause') focusUi.pause = e.target.checked;
+  if (e.target.id === 'f-today') focusUi.today = e.target.checked;
+});
+
 // Every pop-up gets a ✕ in its corner, and a tap outside it closes it too.
 function addX(d) {
   const b = document.createElement('button'); b.className = 'x'; b.type = 'button'; b.textContent = '✕';
@@ -769,6 +825,24 @@ document.addEventListener('click', async (ev) => {
     if (!confirm('Remove the GitHub key from this phone?')) return;
     try { localStorage.removeItem(KEY); } catch (e) {}
     token = null; render();
+  } else if (act === 'fchip') {
+    focusUi.touched = true;
+    if (key === 'all') focusUi.pick = focusUi.pick.has('all') ? new Set() : new Set(['all']);
+    else { focusUi.pick.delete('all'); focusUi.pick.has(key) ? focusUi.pick.delete(key) : focusUi.pick.add(key); }
+    $('#fchips').innerHTML = chipsHtml();
+  } else if (act === 'focus-send') {
+    const text = ($('#focus-text').value || '').trim();
+    if (!text) return toast('Say or type the instruction first.');
+    const lanes = focusUi.pick.has('all') ? 'all' : LANE_KEYS.filter((k) => focusUi.pick.has(k)).map((k) => k.toLowerCase()).join(',');
+    if (!lanes) return toast('Pick which lanes it is for.');
+    const pause = $('#f-pause').checked, today = $('#f-today').checked;
+    if (!confirm(`Send to ${focusLabel(lanes)}?${pause ? '\nOther lanes will be paused.' : ''}\n\n"${text.slice(0, 200)}"`)) return;
+    await sendRequest(`focus ${lanes}${pause ? ' pause-others' : ''}${today ? ' today' : ''}`, 'focus', text.replace(/^\s*sent from dcm remote\.?\s*$/gim, ''));
+    const box = document.getElementById('focus-text'); if (box) box.value = '';
+    focusUi.pick = new Set(); focusUi.touched = false; focusUi.pause = false; focusUi.today = false; render();
+  } else if (act === 'focus-clear') {
+    if (!confirm('Remove this focus instruction? The lanes go back to their usual order.')) return;
+    sendRequest('focus-clear ' + key, 'focus-clear ' + key);
   } else if (act === 'review') {
     rvOpen(decideSub);
   } else if (act === 'rv-close') {
