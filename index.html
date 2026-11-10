@@ -79,6 +79,13 @@
   .seg2 { display:grid; grid-template-columns:1fr 1fr; gap:4px; background:var(--idle-bg); border-radius:12px; padding:4px; margin-bottom:12px; }
   .seg2 button { border:0; border-radius:9px; padding:9px 6px; font:inherit; font-weight:600; background:transparent; color:var(--muted); }
   .seg2 button[aria-pressed="true"] { background:var(--card); color:var(--ink); box-shadow:0 1px 3px rgba(0,0,0,.12); }
+  #review { position:fixed; inset:0; z-index:40; background:var(--bg); overflow-y:auto; -webkit-overflow-scrolling:touch; padding:calc(env(safe-area-inset-top) + 10px) 16px calc(env(safe-area-inset-bottom) + 24px); }
+  #review.hide { display:none; }
+  .rvtop { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:10px; }
+  .rvtop .x { position:static; }
+  .rvbar { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:10px 0; }
+  .big { min-height:52px; font-size:17px; }
+  .rvans { margin-top:8px; padding:10px 12px; border-radius:10px; background:var(--wait-bg); color:var(--ink); white-space:pre-wrap; font-size:15px; }
   .hright { display:flex; align-items:center; gap:10px; }
   .quit { border:0; border-radius:999px; padding:6px 12px; font:inherit; font-size:14px; font-weight:600; background:var(--idle-bg); color:var(--ink); }
   #closed { position:fixed; inset:0; z-index:50; background:var(--bg); display:flex; align-items:center; justify-content:center; padding:24px 16px; }
@@ -91,6 +98,7 @@
   <h1>DCM Remote</h1>
   <div class="hright"><div class="pc" id="pc">…</div><button class="quit" id="quit" type="button" aria-label="Close the app">Close</button></div>
 </header>
+<div id="review" class="hide" role="dialog" aria-label="Review out loud"></div>
 <div id="closed" class="hide"><div class="closedbox"><h3 style="margin-top:0;font-size:20px">DCM Remote is closed</h3>
   <p>It has stopped checking GitHub, so it uses no data or battery.</p>
   <p class="meta">To leave the screen, swipe up from the bottom edge. (iPhone does not let an app close itself.)</p>
@@ -418,6 +426,8 @@ function viewRead(i) {
 function viewDecide() {
   const all = blockers(); const nr = data.reading.length;
   let h = `<div class="seg2"><button data-act="sub" data-key="decide" aria-pressed="${decideSub === 'decide'}">Decide (${all.length})</button><button data-act="sub" data-key="read" aria-pressed="${decideSub === 'read'}">To read (${nr})</button></div>`;
+  const nRev = rvList(decideSub).length;
+  if (nRev) h += `<button class="primary big" style="width:100%;margin-bottom:12px" data-act="review">🔊 Review out loud (${nRev})</button>`;
   if (decideSub === 'read') {
     if (!nr) return h + '<div class="empty">Nothing to read.</div>';
     return h + '<p class="meta">Finished research and the weekly Tool Watch. Nothing here holds up a lane.</p>' + data.reading.map(viewRead).join('');
@@ -525,7 +535,12 @@ function render() {
   let h = data.error ? `<div class="warn">${esc(data.error)}</div>` : '';
   if (!data.loadedAt && !data.error) h += '<div class="empty">Loading…</div>';
   else h += ({ status: viewStatus, decide: viewDecide, merges: viewMerges, lanes: viewLanes })[tab]();
+  const typed = {}; let focusId = null;
+  document.querySelectorAll('#main textarea[id], #main input[type=text][id]').forEach((el) => { if (el.value) typed[el.id] = el.value; if (el === document.activeElement) focusId = el.id; });
   main.innerHTML = h;
+  for (const [id, v] of Object.entries(typed)) { const el = document.getElementById(id); if (el && !el.value) el.value = v; }
+  if (focusId) { const el = document.getElementById(focusId); if (el) el.focus(); }
+  if (rv.on) rvLive();
   for (const key of Object.keys(open)) if (open[key] && tab === 'decide' && !qcache[key]) loadQuestion(key);
 }
 
@@ -539,13 +554,34 @@ async function loadQuestion(key) {
     const text = last ? last.body : (issue ? issue.body : '');
     qcache[key] = {
       text: last ? `Latest comment (${ago(last.created_at)}):\n\n${last.body.replace(/\*\*/g, '')}` : 'No comments yet. The question is in the card above; open it on GitHub for the full text.',
-      choices: parseChoices(text), rec: /recommend/i.test(text || ''),
+      choices: parseChoices(text), rec: /recommend/i.test(text || ''), raw: text || '',
     };
   } catch (e) { qcache[key] = { text: e.message, choices: [], rec: false }; }
   loadQuestion.busy[key] = false; render();
 }
+loadQuestion.wait = async (key) => { if (!qcache[key]) { loadQuestion.busy[key] = false; await loadQuestion(key); } return qcache[key]; };
 loadQuestion.busy = {};
 
+// Got it / Drop it / a decision on a research answer. Throws on a GitHub error.
+async function issueAction(act, key, text) {
+  const [rk, n] = key.split('#'); const repo = CFG.repos[rk];
+  if (act === 'gotit') {
+    await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: 'Read. Got it.\n\n— Anthony (DCM Remote)' } });
+    await api(`repos/${repo}/issues/${n}`, { method: 'PATCH', body: { state: 'closed', state_reason: 'completed' } });
+    toast('Closed. Thanks.');
+  } else if (act === 'drop') {
+    await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: 'Dropped: no longer needed.\n\n— Anthony (DCM Remote)' } });
+    await api(`repos/${repo}/issues/${n}`, { method: 'PATCH', body: { state: 'closed', state_reason: 'not_planned' } });
+    toast('Dropped.');
+  } else {
+    await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: 'Decision: ' + text.replace(/^decision:\s*/i, '') + '\n\n— Anthony (DCM Remote)' } });
+    await api(`repos/${repo}/issues/${n}/labels`, { method: 'POST', body: { labels: ['decided'] } });
+    try { await api(`repos/${repo}/issues/${n}/labels/for-reading`, { method: 'DELETE' }); } catch (e) {}
+    toast('Decision sent. Lane R files the work next time it runs.');
+  }
+  open[key] = false; delete qcache[key];
+  await loadAll();
+}
 async function postAnswer(key, text, release, btn) {
   const [rk, n] = key.split('#'); const repo = CFG.repos[rk];
   if (btn) btn.disabled = true;
@@ -555,7 +591,157 @@ async function postAnswer(key, text, release, btn) {
     open[key] = false; delete qcache[key];
     toast(release ? 'Decision sent. The lane picks it up next time it runs.' : 'Answer sent.');
     await loadAll();
-  } catch (e) { if (btn) btn.disabled = false; toast(e.message); }
+    return true;
+  } catch (e) { if (btn) btn.disabled = false; toast(e.message); return false; }
+}
+
+// ---------- review out loud (step 3) ----------
+// Walks the Decide (or To read) list one item at a time: reads the card aloud with the
+// iPhone's own voice, takes a button or typed/dictated answer, and can ask the PC a question.
+const rv = { on: false, mode: 'decide', keys: [], i: 0, asked: {}, spoken: {} };
+function rvItems(mode) {
+  if (mode === 'read') return data.reading;
+  // Same order as the Decide list: questions holding up a lane, other questions, then old ones.
+  const rank = (b) => (b.kind === 'old' ? 2 : b.other ? 1 : 0);
+  return blockers().filter((b) => b.kind === 'q' || b.kind === 'old').sort((x, y) => rank(x) - rank(y)).map((b) => b.i);
+}
+function rvList(mode) { return rvItems(mode).map((i) => i.repoKey + '#' + i.number); }
+function rvIssue(key) { return [...data.waiting, ...data.reading].find((i) => i.repoKey + '#' + i.number === key); }
+function speechText(t) {
+  return String(t || '')
+    .replace(/<!--[\s\S]*?-->/g, ' ').replace(/```[\s\S]*?```/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1').replace(/https?:\/\/\S+/g, 'a link')
+    .replace(/`([^`]+)`/g, '$1').replace(/[*_#>|]/g, ' ')
+    .replace(/(?:[\w.-]+\/)+([\w.-]+\.\w+)(?::\d+(?:-\d+)?)?/g, '$1')
+    .replace(/\b(\w+)\.(tsx?|jsx?|ps1|md)\b/g, '$1 file')
+    .replace(/→/g, ' to ').replace(/≤/g, ' at most ').replace(/≥/g, ' at least ').replace(/#(\d+)/g, 'number $1')
+    .replace(/\s+/g, ' ').trim();
+}
+let rvVoice = null;
+function say(text) {
+  if (!('speechSynthesis' in window)) return;
+  try {
+    speechSynthesis.cancel();
+    if (!rvVoice) { const vs = speechSynthesis.getVoices(); rvVoice = vs.find((v) => /en-US/.test(v.lang) && /Samantha|Ava|Enhanced|Premium/i.test(v.name)) || vs.find((v) => /^en/.test(v.lang)) || null; }
+    // iPhone stops long speech partway, so speak in sentence-sized pieces.
+    const parts = speechText(text).split(/(?<=[.!?])\s+/).filter((x) => x.trim());
+    for (const p of parts) { const u = new SpeechSynthesisUtterance(p.trim()); u.lang = 'en-US'; u.rate = 1; if (rvVoice) u.voice = rvVoice; speechSynthesis.speak(u); }
+  } catch (e) {}
+}
+function recSentence(raw) {
+  const lines = String(raw || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const i = lines.findIndex((l) => /recommend/i.test(l));
+  if (i < 0) return '';
+  let r = lines[i].replace(/^[#*\-\s]*(my\s+)?recommendation:?\**\s*/i, '');
+  if (r.length < 25 && lines[i + 1]) r += ' ' + lines[i + 1];
+  return speechText(r).slice(0, 320);
+}
+function rvSpeech(key) {
+  const i = rvIssue(key); if (!i) return '';
+  const c = card(i.body); const q = qcache[key]; const lane = laneOf(i.labels);
+  let t = `Item ${rv.i + 1} of ${rv.keys.length}. ${lane ? 'Lane ' + lane + ', ' : ''}issue ${i.number}. ${i.title.replace(/^\[Tool Watch\]\s*/, '')}. `;
+  for (const k of rv.mode === 'read' ? ['Status', 'Needs you', 'Why it matters'] : ['Needs you', 'What it does', 'Why it matters', 'Status']) if (c[k]) t += `${k}: ${c[k]} `;
+  if (q && q.choices.length) t += ' Your options. ' + q.choices.map((ch) => `Option ${ch.id}: ${ch.label}.`).join(' ');
+  const rec = q ? recSentence(q.raw) : '';
+  if (rec) t += ' The recommendation: ' + rec;
+  return t + (rv.mode === 'read' ? ' Say got it, or give a decision.' : ' Tap a button, or answer in your own words.');
+}
+async function rvOpen(mode) {
+  rv.mode = mode; rv.keys = rvList(mode); rv.i = 0; rv.on = true;
+  if (!rv.keys.length) return toast('Nothing to review.');
+  try { speechSynthesis.cancel(); speechSynthesis.speak(new SpeechSynthesisUtterance(' ')); } catch (e) {}   // unlocks speech on iPhone
+  $('#review').classList.remove('hide'); document.body.style.overflow = 'hidden';
+  await rvGo(0);
+}
+function rvClose() { rv.on = false; try { speechSynthesis.cancel(); } catch (e) {} $('#review').classList.add('hide'); document.body.style.overflow = ''; render(); }
+async function rvGo(i) {
+  if (i >= rv.keys.length) {
+    $('#review').innerHTML = `<div class="rvtop"><b>Review</b>${'<button class="x" data-act="rv-close" aria-label="Close review">✕</button>'}</div><div class="card"><h3>All done</h3><p>You went through all ${rv.keys.length}.</p><button class="primary big" style="width:100%" data-act="rv-close">Back to the list</button></div>`;
+    say(`That's all ${rv.keys.length}. Nice work.`); return;
+  }
+  rv.i = Math.max(0, i); const key = rv.keys[rv.i];
+  rvShow(); window.setTimeout(() => $('#review').scrollTo(0, 0), 0);
+  await loadQuestion.wait(key);
+  if (rv.on && rv.keys[rv.i] === key) { rvShow(); say(rvSpeech(key)); }
+}
+function rvShow() {
+  const key = rv.keys[rv.i]; const i = rvIssue(key);
+  if (!i) { $('#review').innerHTML = `<div class="rvtop"><b>Review · ${rv.i + 1} of ${rv.keys.length}</b><button class="x" data-act="rv-close" aria-label="Close review">✕</button></div><div class="card">This one was settled already.</div><div class="rvbar"><button class="secondary big" data-act="rv-prev">◀ Back</button><button class="primary big" data-act="rv-next">Next ▶</button></div>`; return; }
+  const c = card(i.body); const q = qcache[key]; const lane = laneOf(i.labels);
+  const old = rv.mode === 'decide' && Date.now() - new Date(i.updated_at) > OLD_DAYS * 864e5;
+  let h = `<div class="rvtop"><b>Review · ${rv.i + 1} of ${rv.keys.length}</b><button class="x" data-act="rv-close" aria-label="Close review">✕</button></div>`;
+  h += `<div class="card"><div class="meta">${i.repoKey === 'market' ? 'Market' : 'DCM'} #${i.number}${lane ? ' · Lane ' + lane : ''} · updated ${ago(i.updated_at)}</div><h3>${esc(i.title)}</h3>`;
+  h += cardHtml(c, ['Needs you', 'What it does', 'Why it matters', 'Status']);
+  h += '<div class="rvbar"><button class="secondary" data-act="rv-say">🔊 Read again</button><button class="secondary" data-act="rv-hush">⏹ Stop voice</button></div>';
+  if (!q) h += '<p class="meta">Loading the latest comment…</p>';
+  else {
+    const rec = recSentence(q.raw);
+    if (rec) h += `<div class="q"><b>Recommendation:</b> ${esc(rec)}</div>`;
+    h += '<div style="display:grid;gap:8px;margin-top:10px">';
+    if (rv.mode === 'read') h += '<button class="primary big" data-act="rv-gotit">Got it</button>';
+    if (q.rec) h += `<button class="${rv.mode === 'read' ? 'secondary' : 'primary'} big" data-act="rv-choose" data-choice="rec">Go with the recommendation</button>`;
+    for (const ch of q.choices) h += `<button class="secondary" style="text-align:left" data-act="rv-choose" data-choice="${esc(ch.id)}">${esc(ch.id)}. ${esc(ch.label)}</button>`;
+    if (old) h += '<button class="secondary" data-act="rv-drop">Drop it (not needed any more)</button>';
+    h += '</div>';
+  }
+  h += `<div class="meta" style="margin-top:12px">Answer in your own words. Tap the box, then the 🎤 on the keyboard to talk.</div><textarea id="rv-ans" placeholder="${rv.mode === 'read' ? 'Your decision' : 'Your answer'}"></textarea>`;
+  h += '<button class="primary" style="width:100%;margin-top:8px" data-act="rv-answer">Send my answer</button>';
+  h += '<div class="meta" style="margin-top:14px">Not sure? Ask a question. Your PC asks Claude Code (read-only) and the answer is read to you.</div><textarea id="rv-ask" placeholder="e.g. What happens if I say no?"></textarea>';
+  h += '<button class="secondary" style="width:100%;margin-top:8px" data-act="rv-ask">Ask</button><div id="rv-live"></div></div>';
+  h += '<div class="rvbar"><button class="secondary big" data-act="rv-prev" ' + (rv.i ? '' : 'disabled') + '>◀ Back</button><button class="primary big" data-act="rv-next">Skip ▶</button></div>';
+  $('#review').innerHTML = h; rvLive();
+}
+// The part that changes while you wait: the PC's answer to your question.
+function rvLive() {
+  const el = document.getElementById('rv-live'); if (!el) return;
+  const key = rv.keys[rv.i]; const asks = rv.asked[key] || [];
+  el.innerHTML = asks.map((id) => {
+    const r = data.requests.find((x) => x.id === id);
+    const res = r && r.results.find((x) => x.verdict !== 'started');
+    if (!res) return '<div class="rvans">Asking your PC… the answer usually takes 1 to 3 minutes.</div>';
+    const parts = res.text.split('\n\n'); const qline = parts.shift();
+    const ans = parts.join('\n\n') || qline;
+    if (res.verdict === 'answered' && !rv.spoken[id]) { rv.spoken[id] = true; say('Answer from your PC. ' + ans); setTimeout(() => el.scrollIntoView({ behavior: 'smooth', block: 'end' }), 50); }
+    return `<div class="rvans"><div class="meta">${esc(qline.replace(/^You asked about \S+:\s*/, 'You asked: '))}</div>${esc(ans)}</div>`;
+  }).join('');
+}
+async function rvAsk(question) {
+  const key = rv.keys[rv.i];
+  try {
+    const c = await api(`repos/${CFG.repos.dcm}/issues/${CFG.requestIssue}/comments`, { method: 'POST', body: { body: `dcm-remote: ask ${key}\n${question}\n\nSent from DCM Remote.` } });
+    const id = String(c.id); pending[id] = 'ask ' + key;
+    (rv.asked[key] = rv.asked[key] || []).push(id);
+    say('Asking your PC. I will read the answer when it comes back.');
+    await loadAll();
+  } catch (e) { toast(e.message); }
+}
+async function rvAction(act, t) {
+  const key = rv.keys[rv.i]; const i = rvIssue(key); if (!i) return;
+  const q = qcache[key]; const lane = laneOf(i.labels);
+  if (act === 'rv-say') return say(rvSpeech(key));
+  if (act === 'rv-hush') { try { speechSynthesis.cancel(); } catch (e) {} return; }
+  if (act === 'rv-ask') {
+    const text = ($('#rv-ask').value || '').trim(); if (!text) return toast('Type or say your question first.');
+    $('#rv-ask').value = ''; return rvAsk(text);
+  }
+  let text = '';
+  if (act === 'rv-choose') {
+    const ch = t.dataset.choice;
+    text = ch === 'rec' ? 'go with the recommendation above.' : `option ${ch} — ${((q && q.choices.find((c) => c.id === ch)) || {}).label || ''}.`;
+    const extra = ($('#rv-ans').value || '').trim(); if (extra) text += '\n\n' + extra;
+  } else if (act === 'rv-answer') {
+    text = ($('#rv-ans').value || '').trim(); if (!text) return toast('Type or say your answer first.');
+  }
+  if (act === 'rv-drop' && !confirm('Drop #' + i.number + '? It is closed as "not planned".')) return;
+  t.disabled = true;
+  try {
+    if (act === 'rv-gotit') await issueAction('gotit', key);
+    else if (act === 'rv-drop') await issueAction('drop', key);
+    else if (rv.mode === 'read') await issueAction('decideread', key, text);
+    else if (!(await postAnswer(key, (act === 'rv-choose' ? 'Decision: ' : '') + text, !!lane, null))) throw new Error('Not sent. Try again.');
+    say('Sent.');
+    await rvGo(rv.i + 1);
+  } catch (e) { t.disabled = false; toast(e.message); }
 }
 
 // Every pop-up gets a ✕ in its corner, and a tap outside it closes it too.
@@ -583,6 +769,14 @@ document.addEventListener('click', async (ev) => {
     if (!confirm('Remove the GitHub key from this phone?')) return;
     try { localStorage.removeItem(KEY); } catch (e) {}
     token = null; render();
+  } else if (act === 'review') {
+    rvOpen(decideSub);
+  } else if (act === 'rv-close') {
+    rvClose();
+  } else if (act === 'rv-next' || act === 'rv-prev') {
+    rvGo(rv.i + (act === 'rv-next' ? 1 : -1));
+  } else if (act && act.startsWith('rv-')) {
+    rvAction(act, t);
   } else if (act === 'sub') {
     decideSub = key; render(); window.scrollTo(0, 0);
   } else if (act === 'gotit' || act === 'drop' || act === 'decideread') {
@@ -594,24 +788,7 @@ document.addEventListener('click', async (ev) => {
       if (!confirm('Send this decision? Lane R files the work for it next time it runs.')) return;
     } else if (act === 'drop' && !confirm('Drop #' + n + '? It is closed as "not planned". You can reopen it on GitHub.')) return;
     t.disabled = true;
-    try {
-      if (act === 'gotit') {
-        await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: 'Read. Got it.\n\n— Anthony (DCM Remote)' } });
-        await api(`repos/${repo}/issues/${n}`, { method: 'PATCH', body: { state: 'closed', state_reason: 'completed' } });
-        toast('Closed. Thanks.');
-      } else if (act === 'drop') {
-        await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: 'Dropped: no longer needed.\n\n— Anthony (DCM Remote)' } });
-        await api(`repos/${repo}/issues/${n}`, { method: 'PATCH', body: { state: 'closed', state_reason: 'not_planned' } });
-        toast('Dropped.');
-      } else {
-        await api(`repos/${repo}/issues/${n}/comments`, { method: 'POST', body: { body: 'Decision: ' + text.replace(/^decision:\s*/i, '') + '\n\n— Anthony (DCM Remote)' } });
-        await api(`repos/${repo}/issues/${n}/labels`, { method: 'POST', body: { labels: ['decided'] } });
-        try { await api(`repos/${repo}/issues/${n}/labels/for-reading`, { method: 'DELETE' }); } catch (e) {}
-        toast('Decision sent. Lane R files the work next time it runs.');
-      }
-      open[key] = false; delete qcache[key];
-      await loadAll();
-    } catch (e) { t.disabled = false; toast(e.message); }
+    try { await issueAction(act, key, text); } catch (e) { t.disabled = false; toast(e.message); }
   } else if (act === 'toggle') {
     open[key] = !open[key]; render();
   } else if (act === 'answer') {
