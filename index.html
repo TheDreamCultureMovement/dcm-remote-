@@ -89,6 +89,11 @@
   .lchips { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
   .lchip { border:1px solid var(--line); border-radius:999px; padding:7px 13px; font:inherit; font-weight:600; background:var(--card); color:var(--ink); min-width:44px; }
   .lchip[aria-pressed="true"] { background:var(--accent); border-color:transparent; color:var(--accent-ink); }
+  .alarm { background:var(--bad-bg, #F6D8D2); color:var(--bad, #7A2414); border:2px solid currentColor; border-radius:14px; padding:12px 14px; margin-bottom:12px; }
+  .alarm b:first-child { font-size:17px; } .alarm p { margin:6px 0 0; color:inherit; }
+  .pc.pcbad { color:#fff; background:#B5452F; padding:3px 10px; border-radius:999px; font-weight:700; animation:pcpulse 1.6s ease-in-out infinite; }
+  @keyframes pcpulse { 50% { opacity:.65; } }
+  @media (prefers-reduced-motion: reduce) { .pc.pcbad { animation:none; } }
   .hright { display:flex; align-items:center; gap:10px; }
   .quit { border:0; border-radius:999px; padding:6px 12px; font:inherit; font-size:14px; font-weight:600; background:var(--idle-bg); color:var(--ink); }
   #closed { position:fixed; inset:0; z-index:50; background:var(--bg); display:flex; align-items:center; justify-content:center; padding:24px 16px; }
@@ -227,6 +232,13 @@ async function loadAll() {
       .reverse();
     for (const r of data.requests) if (r.result && pending[r.id] && r.result.verdict !== 'started') delete pending[r.id];   // once queued, the queue card shows it
     data.loadedAt = Date.now();
+    const ps = pcState().state;
+    if (loadAll.lastPc && loadAll.lastPc !== ps) {
+      if (ps === 'online') toast('✅ Your PC is back online.');
+      else if (ps === 'stopped' || ps === 'offline') { toast('⚠️ Lost the connection to your PC.'); try { navigator.vibrate && navigator.vibrate(300); } catch (e) {} }
+    }
+    loadAll.lastPc = ps;
+    try { if ('setAppBadge' in navigator) { (ps === 'stopped' || ps === 'offline') ? navigator.setAppBadge(1) : navigator.clearAppBadge(); } } catch (e) {}
   } catch (e) { data.error = e.message || String(e); }
   render();
 }
@@ -234,7 +246,15 @@ async function loadAll() {
 // A request with one of these verdicts is still in progress: more results follow.
 const OPEN_VERDICTS = ['started', 'queued', 'waiting'];
 function verdictCls(v) { return ['done', 'merged'].includes(v) ? 'ok' : OPEN_VERDICTS.includes(v) ? 'wait' : 'bad'; }
+// Asked before anything is sent while the PC can't act on it.
+function confirmOffline() {
+  const p = pcState();
+  if (p.state !== 'stopped' && p.state !== 'offline') return true;
+  return confirm((p.state === 'stopped' ? 'The phone link is OFF on your PC.' : `Your PC is not answering (last heard ${ago(p.at)}).`) +
+    '\n\nThis request will wait, and the PC drops it if it is not back within 30 minutes. Send anyway?');
+}
 async function sendRequest(cmd, label, extra) {
+  if (!confirmOffline()) return;
   try {
     const c = await api(`repos/${CFG.repos.dcm}/issues/${CFG.requestIssue}/comments`, { method: 'POST', body: { body: 'dcm-remote: ' + cmd + (extra ? '\n' + extra : '') + '\n\nSent from DCM Remote.' } });
     pending[String(c.id)] = label;
@@ -245,12 +265,34 @@ async function sendRequest(cmd, label, extra) {
 }
 
 // ---------- screens ----------
-function pcLine() {
+// The PC reports in at least every 5 minutes while the phone link runs.
+const OFFLINE_MIN = 8;
+function pcState() {
   const s = data.status;
-  if (!s || !s.seen) return { text: 'PC: not reported yet', cls: 'wait' };
+  if (!s || !s.seen) return { state: 'unknown' };
+  if (s.stopped) return { state: 'stopped', at: s.stopped };
   const min = (Date.now() - new Date(s.seen).getTime()) / 60000;
-  if (min <= 7) return { text: 'PC online · ' + ago(s.seen), cls: 'ok' };
-  return { text: 'PC offline · last seen ' + ago(s.seen), cls: 'bad' };
+  return min <= OFFLINE_MIN ? { state: 'online', at: s.seen } : { state: 'offline', at: s.seen };
+}
+function pcLine() {
+  const p = pcState();
+  if (p.state === 'unknown') return { text: 'PC: not reported yet', cls: 'wait' };
+  if (p.state === 'online') return { text: 'PC online · ' + ago(p.at), cls: 'ok' };
+  if (p.state === 'stopped') return { text: 'Phone link OFF', cls: 'bad' };
+  return { text: 'PC not answering', cls: 'bad' };
+}
+function whenText(iso) {
+  const d = new Date(iso); const t = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  const today = new Date(); const y = new Date(); y.setDate(y.getDate() - 1);
+  const day = d.toDateString() === today.toDateString() ? 'today' : d.toDateString() === y.toDateString() ? 'yesterday' : d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
+  return `${t} ${day}`;
+}
+// The big red banner shown on every screen while the PC can't carry out requests.
+function offlineBanner() {
+  const p = pcState();
+  if (p.state === 'stopped') return `<div class="alarm" role="alert"><b>⚠️ The phone link is OFF</b><p>It was turned off on your PC at ${esc(whenText(p.at))} (${esc(ago(p.at))}), with the "Stop phone link" button in the DCM Hub. Nothing you send from here will run.</p><p><b>To fix:</b> on your PC, close the DCM Hub and open it again.</p></div>`;
+  if (p.state === 'offline') return `<div class="alarm" role="alert"><b>⚠️ Your PC is not answering</b><p>Last heard from: ${esc(whenText(p.at))} (${esc(ago(p.at))}). The PC may be asleep or off, or the DCM Hub is closed. Nothing you send from here will run until it is back.</p><p><b>To fix:</b> wake the PC and open the DCM Hub.</p></div>`;
+  return '';
 }
 function laneOfPr(p) {
   const m = (p.head && p.head.ref || '').match(/^lane\/([a-z])/);
@@ -544,8 +586,9 @@ function viewLanes() {
   h += '<h2>Recent requests</h2>';
   if (!data.requests.length) h += '<div class="empty">No requests in the last 4 days.</div>';
   for (const r of data.requests.slice(0, 15)) {
-    const v = r.result ? r.result.verdict : 'waiting for the PC';
-    const cls = r.result ? verdictCls(v) : 'wait';
+    const late = !r.result && Date.now() - new Date(r.at) > 3 * 60000;
+    const v = r.result ? r.result.verdict : late ? 'no answer from the PC' : 'waiting for the PC';
+    const cls = r.result ? verdictCls(v) : late ? 'bad' : 'wait';
     h += `<div class="card"><div class="row"><b>${esc(r.cmd.replace(/ no-press-confirmed$/, ''))}</b><span class="chip ${cls}">${esc(v)}</span></div><div class="meta">${ago(r.at)}</div>`;
     // Every reply the PC posted for this request, oldest first (merge-all posts one per PR).
     for (const x of r.results) {
@@ -577,10 +620,12 @@ function render() {
   if (!token) { $('#nav').classList.add('hide'); $('#pc').textContent = ''; main.innerHTML = viewSetup(render.msg); return; }
   $('#nav').classList.remove('hide');
   const pc = pcLine(); $('#pc').textContent = data.loadedAt ? pc.text : 'Loading…';
+  $('#pc').classList.toggle('pcbad', !!data.loadedAt && pc.cls === 'bad');
   document.querySelectorAll('nav button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
   const nb = data.loadedAt ? blockers().length : 0; const bw = $('#bWait'); bw.textContent = nb; bw.classList.toggle('hide', !nb);
   const bp = $('#bPr'); bp.textContent = data.prs.length; bp.classList.toggle('hide', !data.prs.length);
   let h = data.error ? `<div class="warn">${esc(data.error)}</div>` : '';
+  if (data.loadedAt) h += offlineBanner();
   if (!data.loadedAt && !data.error) h += '<div class="empty">Loading…</div>';
   else h += ({ status: viewStatus, decide: viewDecide, merges: viewMerges, lanes: viewLanes })[tab]();
   const typed = {}; let focusId = null;
@@ -755,6 +800,7 @@ function rvLive() {
 }
 async function rvAsk(question) {
   const key = rv.keys[rv.i];
+  if (!confirmOffline()) return;
   try {
     const c = await api(`repos/${CFG.repos.dcm}/issues/${CFG.requestIssue}/comments`, { method: 'POST', body: { body: `dcm-remote: ask ${key}\n${question}\n\nSent from DCM Remote.` } });
     const id = String(c.id); pending[id] = 'ask ' + key;
