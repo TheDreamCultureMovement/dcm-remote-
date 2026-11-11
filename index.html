@@ -338,6 +338,13 @@ function viewStatus() {
     const done = prs.length + closed.length;
     h += `<div class="card"><div class="row"><div><b>Lane ${k}</b> <span class="meta">${esc(CFG.laneNames[k])}</span></div><span class="chip ${cls}">${esc(st)}</span></div>`;
     h += `<div class="meta" style="margin-top:4px">${done ? done + ' done today' : 'Nothing finished today'}${asks ? ` · ${asks} question${asks > 1 ? 's' : ''} for you` : ''}${rep ? ' · report written ' + esc(rep) : ''}</div>`;
+    const au = s && s.auto;
+    if (au) {
+      const m = (au.runMin || {})[k] || 0; const why = (au.why || {})[k]; const rd = (au.ready || {})[k];
+      const ran = m ? `Ran ${m >= 60 ? Math.floor(m / 60) + ' h ' : ''}${m % 60} min today` : 'Not run yet today';
+      h += `<div class="meta" style="margin-top:4px">⏱ ${ran}${rd != null ? ` · ${rd} job${rd === 1 ? '' : 's'} ready` : ''}</div>`;
+      if (why && why !== 'running' && st !== 'running') h += `<div class="meta" style="margin-top:2px">Idle: ${esc(why)}</div>`;
+    }
     if (focusFor(k).length) h += `<div class="meta" style="margin-top:4px">🎙 Focus: ${esc(focusFor(k).map((f) => f.text).join(' · ').slice(0, 160))}</div>`;
     if (now.length) h += '<div style="margin-top:8px;font-size:14px"><b>Working on</b>' + now.map((i) => `<div>#${i.number} ${esc(i.title)}</div>`).join('') + '</div>';
     const key = 'lane-' + k;
@@ -493,7 +500,13 @@ function viewDecide() {
 function isAccessPr(p) { return /^lane\/x/.test(p.head.ref) || (p.labels || []).some((l) => l.name === 'access'); }
 // Mirrors the PC's "ready" rule for merge-all (remote-watcher.ps1, Add-AllReady).
 const HOLD_LABELS = ['hold', 'needs-anthony', 'attended-waiting'];
-function isReadyPr(p) { return !p.draft && !isAccessPr(p) && !(p.labels || []).some((l) => HOLD_LABELS.includes(l.name) || l.name === 'lane-x'); }
+function isReadyPr(p) { return !p.draft && !isAccessPr(p) && !stackedOn(p) && !(p.labels || []).some((l) => HOLD_LABELS.includes(l.name) || l.name === 'lane-x'); }
+// A stacked PR (Lane X) targets another PR's branch; it can merge only after that one.
+function stackedOn(p) {
+  const base = p.base && p.base.ref; if (!base || base === 'main') return null;
+  const under = data.prs.find((x) => x.repoKey === p.repoKey && x.head && x.head.ref === base);
+  return under ? under.number : base;
+}
 function readyList(rk) {
   const q = (data.status && data.status.queue) || []; const run = runningTag();
   return data.prs.filter((p) => p.repoKey === rk && isReadyPr(p) && !q.includes(rk + '#' + p.number) && run !== rk + '#' + p.number);
@@ -523,8 +536,9 @@ function viewMerges() {
   return viewQueue() + data.prs.map((p) => {
     const c = card(p.body); const key = p.repoKey + '#' + p.number;
     const qi = q.indexOf(key);
-    const busy = qi >= 0 || run === key || Object.values(pending).some((v) => v === 'merge ' + key);
-    const btn = run === key ? 'Merging now…' : qi >= 0 ? `In queue (${qi + 1} of ${q.length})` : busy ? 'Sent…' : 'Yes, merge';
+    const under = stackedOn(p);
+    const busy = !!under || qi >= 0 || run === key || Object.values(pending).some((v) => v === 'merge ' + key);
+    const btn = under ? `Merge #${under} first` : run === key ? 'Merging now…' : qi >= 0 ? `In queue (${qi + 1} of ${q.length})` : busy ? 'Sent…' : 'Yes, merge';
     let h = `<div class="card"><div class="meta">${p.repoKey === 'market' ? 'Market' : 'DCM'} PR #${p.number} · ${esc(p.head.ref)} · opened ${ago(p.created_at)}</div><h3>${esc(p.title)}</h3>`;
     h += cardHtml(c, ['What it does', 'Status', 'Needs you']);
     if (isAccessPr(p)) h += '<div class="warn">Changes sign-in (Lane X). Say yes only to this one PR, after reading it.</div>';
@@ -579,10 +593,18 @@ function viewFocus() {
 function viewLanes() {
   const s = data.status; const run = (k) => s && s.lanes && s.lanes[k] === 'running';
   const now = new Date(); const mins = now.getHours() * 60 + now.getMinutes();
-  let h = viewFocus() + '<div class="card"><h3>Start lanes</h3><p class="meta">The PC keeps its rules: Lane C only from 6 pm to 7 am; Lanes M and D start last, after A, B, C and R have finished; Lane X starts no new job after 4:30 pm; nothing starts while Lane X runs.</p>';
-  h += '<button class="primary" style="margin-top:8px" data-act="start" data-lane="all">Start all lanes</button><div class="btns">';
+  const au = (s && s.auto) || null; const autoOn = au ? au.on : false; const max = au ? au.max : 4;
+  let h = '<div class="card"><h3>Lanes</h3>';
+  if (!au) h += '<p class="meta">Automatic lanes need the updated PC watcher (reopen the DCM Hub).</p>';
+  else {
+    h += `<div class="row" style="margin-top:4px"><b>Automatic lanes</b><button class="lchip" data-act="auto" data-key="${autoOn ? 'off' : 'on'}" aria-pressed="${autoOn}">${autoOn ? 'ON' : 'OFF'}</button></div>`;
+    h += `<p class="meta">${autoOn ? `Every 15 minutes the PC starts lanes that have jobs ready, up to ${max} at once. Lane C runs 6 pm to 7 am. Lane X has the PC to itself from 6 to 9 am (no other lane starts from 4:30 am).` : 'Off: the PC starts nothing by itself. Lanes already running finish their session.'}${au.checked ? ' Last check ' + esc(ago(au.checked)) + '.' : ''}</p>`;
+    h += '<div class="meta" style="margin-top:6px">Most lanes at once</div><div class="lchips">' + [2, 3, 4, 5, 6].map((n) => `<button class="lchip" data-act="automax" data-key="${n}" aria-pressed="${n === max}">${n}</button>`).join('') + '</div>';
+  }
+  h += '<button class="primary" style="margin-top:10px;width:100%" data-act="start" data-lane="all">Check and start lanes now</button><div class="meta" style="margin-top:8px">Or start one lane by hand:</div><div class="btns">';
   for (const k of ['A', 'B', 'C', 'D', 'R', 'M']) h += `<button class="secondary" data-act="start" data-lane="${k}" ${run(k) ? 'disabled' : ''}>Lane ${k}${run(k) ? ' (running)' : ''}</button>`;
   h += `<button class="secondary" data-act="start" data-lane="X" ${run('X') || mins >= 990 ? 'disabled' : ''}>Lane X${run('X') ? ' (running)' : mins >= 990 ? ' (after 4:30)' : ''}</button></div></div>`;
+  h += viewFocus();
   h += '<h2>Recent requests</h2>';
   if (!data.requests.length) h += '<div class="empty">No requests in the last 4 days.</div>';
   for (const r of data.requests.slice(0, 15)) {
@@ -871,6 +893,11 @@ document.addEventListener('click', async (ev) => {
     if (!confirm('Remove the GitHub key from this phone?')) return;
     try { localStorage.removeItem(KEY); } catch (e) {}
     token = null; render();
+  } else if (act === 'auto') {
+    if (key === 'off' && !confirm('Turn automatic lanes OFF? The PC stops starting lanes by itself. Lanes already running finish their session.')) return;
+    sendRequest('auto ' + key, 'auto ' + key);
+  } else if (act === 'automax') {
+    sendRequest('auto max ' + key, 'auto max');
   } else if (act === 'fchip') {
     focusUi.touched = true;
     if (key === 'all') focusUi.pick = focusUi.pick.has('all') ? new Set() : new Set(['all']);
